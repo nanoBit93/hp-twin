@@ -122,6 +122,31 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
     )
 
 
+def resolve_calibration(settings: Any, model: Any):  # type: ignore[no-untyped-def]
+    """Liefert (topo, df, calib): gespeicherte Kalibrierung ODER frisch aus CSV gefittet.
+
+    Bei Fit aus CSV wird die Kalibrierung zusätzlich nach settings.calibration_path gespeichert
+    (damit sie ins Bundle exportiert werden kann).
+    """
+    import json
+
+    from hp_twin.adapters.io_csv import read_measurements
+    from hp_twin.domain.calibration import calibration_from_json, calibration_to_json
+
+    topo = load_topology(settings.topology_path)
+    if settings.use_stored_calibration and Path(settings.calibration_path).exists():
+        calib = calibration_from_json(
+            json.loads(Path(settings.calibration_path).read_text("utf-8"))
+        )
+        df = read_measurements(settings.csv_path) if Path(settings.csv_path).exists() else None
+        return topo, df, calib
+    topo, df, calib = _calibrate_report(settings.topology_path, settings.csv_path, model=model)
+    out = Path(settings.calibration_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(calibration_to_json(calib), indent=2, ensure_ascii=False), "utf-8")
+    return topo, df, calib
+
+
 def _cmd_calibrate(args: argparse.Namespace) -> int:
     import json
 
@@ -284,6 +309,27 @@ def _cmd_push(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bundle(args: argparse.Namespace) -> int:
+    import json
+
+    from hp_twin.adapters.bundle import apply_bundle, build_bundle
+    from hp_twin.adapters.settings import RuntimeSettings
+
+    settings = RuntimeSettings.load()
+    if args.action == "export":
+        b = build_bundle(settings, args.include_secrets, not args.no_calibration)
+        Path(args.file).write_text(json.dumps(b, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(
+            f"Config-Bundle -> {args.file} (Kalibrierung: {'calibration' in b}, "
+            f"Secrets: {args.include_secrets})"
+        )
+    else:
+        bundle = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        res = apply_bundle(bundle, settings)
+        print(f"Bundle angewendet. Geschrieben: {', '.join(res['written'])}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="hp-twin")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -344,6 +390,13 @@ def main(argv: list[str] | None = None) -> int:
     pu.add_argument("--ttl-minutes", type=int, default=None)
     pu.add_argument("--model", default="config/model.yaml")
     pu.set_defaults(func=_cmd_push)
+
+    bd = sub.add_parser("bundle", help="Konfig+Kalibrierung als eine Datei exportieren/importieren")
+    bd.add_argument("action", choices=["export", "import"])
+    bd.add_argument("file")
+    bd.add_argument("--include-secrets", action="store_true")
+    bd.add_argument("--no-calibration", action="store_true")
+    bd.set_defaults(func=_cmd_bundle)
 
     args = p.parse_args(argv)
     return int(args.func(args))

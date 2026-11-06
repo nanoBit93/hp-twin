@@ -10,7 +10,7 @@ Alle Fitter liefern zusätzlich Gütemetriken (R², RMSE) zur Beurteilung des Fi
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
@@ -234,3 +234,37 @@ class CalibrationReport:
             },
             "notes": self.notes,
         }
+
+
+# ----------------------------------------------- Serialisierung (Bundle-Export/Import)
+_HP_METRIC_KEYS = (
+    "n_points",
+    "p_el_r2",
+    "p_el_rmse_w",
+    "q_th_r2",
+    "q_th_rmse_w",
+    "cop_median_measured",
+)
+
+
+def calibration_to_json(report: CalibrationReport) -> dict[str, Any]:
+    """Vollständige, verlustfreie Serialisierung einer Kalibrierung (für portable Bundles)."""
+    return {
+        "heat_pump": asdict(report.heat_pump.heat_pump),
+        "heat_pump_metrics": {k: getattr(report.heat_pump, k) for k in _HP_METRIC_KEYS},
+        "buffer_threshold": asdict(report.buffer_threshold),
+        "discharge": asdict(report.discharge),
+        "notes": list(report.notes),
+    }
+
+
+def calibration_from_json(d: dict[str, Any]) -> CalibrationReport:
+    """Rekonstruiert eine CalibrationReport aus calibration_to_json()."""
+    hp = HeatPumpAirWater(**d["heat_pump"])
+    hp_fit = HeatPumpFit(heat_pump=hp, **d["heat_pump_metrics"])
+    return CalibrationReport(
+        heat_pump=hp_fit,
+        buffer_threshold=ThresholdEstimate(**d["buffer_threshold"]),
+        discharge=DischargeFit(**d["discharge"]),
+        notes=list(d.get("notes", [])),
+    )

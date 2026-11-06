@@ -23,6 +23,9 @@ class RuntimeSettings(BaseModel):
     topology_path: str = "config/example_topology.yaml"
     model_path: str = "config/model.yaml"
     ha_mapping_path: str = "config/ha_mapping.yaml"
+    heizlast_path: str = "config/heizlast.yaml"
+    calibration_path: str = "config/calibration.json"
+    use_stored_calibration: bool = False  # True: gespeicherte Kalibrierung statt Fit aus CSV
     env_path: str = ".env"
     csv_path: str = "data/ha_export/measurements.csv"
     # Home-Assistant-Verbindung (überschreibt .env, falls gesetzt)

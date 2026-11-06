@@ -113,6 +113,35 @@ def post_settings(patch: dict[str, Any]) -> dict[str, Any]:
     return new.public_dict()
 
 
+@app.get("/api/bundle")
+def get_bundle(include_secrets: bool = False, include_calibration: bool = True) -> Any:
+    """Gesamte Config (+ optional Kalibrierung) als eine herunterladbare JSON-Datei."""
+    import json as _json
+
+    from fastapi.responses import Response
+
+    from hp_twin.adapters.bundle import build_bundle
+
+    b = build_bundle(RuntimeSettings.load(), include_secrets, include_calibration)
+    body = _json.dumps(b, indent=2, ensure_ascii=False)
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="hp-twin-config.json"'},
+    )
+
+
+@app.post("/api/bundle")
+def post_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Bundle anwenden (Config-Dateien schreiben). Vorhandene Secrets bleiben erhalten."""
+    from hp_twin.adapters.bundle import apply_bundle
+
+    try:
+        return apply_bundle(bundle, RuntimeSettings.load())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @app.get("/api/model")
 def get_model() -> dict[str, Any]:
     from hp_twin.domain.model_config import ModelConfig

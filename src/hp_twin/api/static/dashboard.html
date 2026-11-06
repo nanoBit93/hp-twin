@@ -70,6 +70,14 @@
         <button id="pushnow" style="background:var(--blue)">▶ Push jetzt</button>
         <button id="dryrun" style="background:#394150;color:#e6edf3">Dry-Run (ohne Push)</button>
       </div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid #2a3340;display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <strong style="color:var(--muted);font-size:13px">Portable Konfiguration:</strong>
+        <button id="dlcfg" style="background:#394150;color:#e6edf3">⬇ Config exportieren</button>
+        <label class="chk" style="color:var(--muted);font-size:12px"><input id="inclSecrets" type="checkbox" /> inkl. Secrets</label>
+        <button id="ulcfg" style="background:#394150;color:#e6edf3">⬆ Config importieren</button>
+        <input id="cfgfile" type="file" accept="application/json,.json" style="display:none" />
+        <span id="cfgMsg" style="color:var(--muted)"></span>
+      </div>
     </div>
 
     <div class="panel"><h2>🔧 Modell-Parameter (config/model.yaml)</h2>
@@ -275,6 +283,30 @@
       } catch(e) { document.getElementById('err').textContent = 'Fehler: ' + e.message; }
       b.disabled=false; b.textContent=t;
     }
+    // --- Config-Bundle Export/Import ---
+    async function downloadConfig() {
+      const sec = document.getElementById('inclSecrets').checked;
+      const r = await fetch(`api/bundle?include_secrets=${sec}&include_calibration=true`);
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'hp-twin-config.json';
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+    }
+    async function uploadConfig(file) {
+      const msg = document.getElementById('cfgMsg'); msg.textContent = 'importiere…';
+      try {
+        const bundle = JSON.parse(await file.text());
+        const r = await fetch('api/bundle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(bundle)});
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || JSON.stringify(j));
+        msg.textContent = '✓ angewendet: ' + (j.written||[]).join(', ');
+        await loadSettings(); await loadModel(); await refreshStatus();
+      } catch(e) { msg.textContent = 'Fehler: ' + e.message; }
+    }
+    document.getElementById('dlcfg').addEventListener('click', downloadConfig);
+    document.getElementById('ulcfg').addEventListener('click', ()=>document.getElementById('cfgfile').click());
+    document.getElementById('cfgfile').addEventListener('change', e=>{ if(e.target.files[0]) uploadConfig(e.target.files[0]); });
+
     document.getElementById('save').addEventListener('click', saveSettings);
     document.getElementById('saveModel').addEventListener('click', saveModel);
     document.getElementById('pushnow').addEventListener('click', ()=>pushNow(true));

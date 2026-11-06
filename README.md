@@ -64,6 +64,20 @@ Im Dashboard unter **„⚙️ Automatik & EOS-Connect-Verbindung"** einstellbar
   der EOS-Payload wird mit `"start":"now"` gesendet → beide Systeme teilen dieselbe Zeitachse.
 - Endpunkte: `GET/POST /api/settings`, `POST /api/push_now` (`{"push":false}` = Dry-Run), `GET /api/status`.
 
+## Portable Konfiguration (Export/Import)
+Gesamte Konfiguration (+ optional Kalibrierung) als **eine Datei** sichern und in einer neuen
+Installation wiederherstellen – im Dashboard („Portable Konfiguration": ⬇ exportieren / ⬆ importieren)
+oder per CLI:
+```bash
+hp-twin bundle export hp-twin-config.json            # ohne Secrets
+hp-twin bundle export hp-twin-config.json --include-secrets
+hp-twin bundle import hp-twin-config.json            # in neuer Installation anwenden
+```
+Das Bundle enthält Topologie, Modellparameter, HA-Mapping, Heizlast, Laufzeit-Einstellungen und
+die Kalibrierung. **Tokens sind standardmäßig nicht enthalten**; beim Import bleiben vorhandene
+Secrets erhalten. Mit `use_stored_calibration` nutzt die neue Installation die mitgelieferte
+Kalibrierung sofort (statt erst aus Messdaten zu fitten). Endpunkte: `GET/POST /api/bundle`.
+
 ## EOS-Connect-Anbindung
 - Format („External load profile", Managed Load, forecast only):
   `{"values": [192×W], "unit": "W", "start": "now", "ttl_minutes"?}` – **gesamte** WP-Leistung

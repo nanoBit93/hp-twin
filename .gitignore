@@ -24,6 +24,7 @@ config/ha_mapping.yaml
 config/heizlast.yaml
 config/topology.yaml
 config/runtime.json
+config/calibration.json
 
 # Ausnahmen: Vorlagen und generisches Beispiel bleiben versioniert
 !config/*.example.yaml

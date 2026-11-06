@@ -63,7 +63,6 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
     from hp_twin.adapters.eos_connect import push_rest
     from hp_twin.adapters.forecast import run_forecast
     from hp_twin.adapters.ha_history import export_to_csv
-    from hp_twin.cli import _calibrate_report
     from hp_twin.domain.model_config import ModelConfig
 
     st = ServiceStatus(running=True, last_run_iso=datetime.now(UTC).isoformat())
@@ -79,12 +78,16 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
                 append=True,
             )
 
-        # 2) Modell + Kalibrierung
+        # 2) Modell + Kalibrierung (gespeichert oder frisch aus CSV)
+        from hp_twin.cli import resolve_calibration
+
         model = ModelConfig.from_path(settings.model_path)
         model.montecarlo.n_runs = settings.forecast_runs
         model.forecast.dhw_setpoint_cap_c = settings.dhw_setpoint_cap_c
         model.forecast.eos_ttl_minutes = settings.eos_ttl_minutes
-        topo, df, calib = _calibrate_report(settings.topology_path, settings.csv_path, model=model)
+        topo, df, calib = resolve_calibration(settings, model)
+        if df is None:
+            raise ValueError("Keine Messdaten (CSV) vorhanden – Export zuerst durchführen")
 
         # 3) Prognose ab Startzustand = Ende der (frischen) Daten
         start_idx = max(len(df) - int(round(settings.horizon_h * 60)) - 1, 0)
