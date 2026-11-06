@@ -29,3 +29,6 @@ config/calibration.json
 # Ausnahmen: Vorlagen und generisches Beispiel bleiben versioniert
 !config/*.example.yaml
 !config/example_topology.yaml
+
+# macOS
+.DS_Store
