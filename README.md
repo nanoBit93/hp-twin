@@ -27,7 +27,7 @@ kommen nur Code und Vorlagen. Kopiere die `*.example.yaml` auf den Namen ohne `.
 
 ## Setup (lokal)
 ```bash
-uv venv --python 3.12 && uv pip install -e ".[dev]"
+uv venv --python 3.12 && uv pip install -e ".[dev]"   # [plots] = matplotlib für CLI-Plots
 cp .env.example .env        # HA_BASE_URL + HA_TOKEN eintragen
 cp config/ha_mapping.example.yaml config/ha_mapping.yaml   # Entities anpassen
 cp config/heizlast.example.yaml   config/heizlast.yaml     # Heizlast eintragen
@@ -89,7 +89,7 @@ Kalibrierung sofort (statt erst aus Messdaten zu fitten). Endpunkte: `GET/POST /
 ## Installation in Home Assistant (Add-on)
 EOS Connect läuft als HA-Add-on; hp-twin genauso. Siehe `hp-twin-addon/DOCS.md`. Kurz:
 1. **Einstellungen → Add-ons → Add-on-Store → ⋮ → Repositories** → URL dieses GitHub-Repos hinzufügen.
-   (In `hp-twin-addon/build.yaml` den eigenen Fork als `REPO_URL` eintragen.)
+   (Eigener Fork: `REPO_URL` im `hp-twin-addon/Dockerfile` anpassen.)
 2. Add-on **hp-twin Wärmepumpen-Zwilling** installieren.
 3. `config/*.yaml` nach `/config` im HA-Dateisystem kopieren (Samba-/VS-Code-Add-on) und in den
    Add-on-Optionen Pfade/Parameter setzen (`topology`, `model`, `forecast_runs`, `eos_base_url`, …).

@@ -13,12 +13,12 @@ dependencies = [
   "pandas>=2.2",
   "scipy>=1.12",
   "pyyaml>=6.0",
-  "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]
 api = ["fastapi>=0.110", "uvicorn>=0.29"]
-dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10", "pandas-stubs", "types-PyYAML", "httpx", "fastapi>=0.110", "uvicorn>=0.29"]
+plots = ["matplotlib>=3.8"]
+dev = ["matplotlib>=3.8", "pytest>=8", "ruff>=0.4", "mypy>=1.10", "pandas-stubs", "types-PyYAML", "httpx", "fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
 hp-twin = "hp_twin.cli:main"

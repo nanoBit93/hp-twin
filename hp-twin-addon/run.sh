@@ -1,26 +1,43 @@
 #!/usr/bin/with-contenv bashio
 set -e
 
-TOPOLOGY=$(bashio::config 'topology')
-MODEL=$(bashio::config 'model')
-RUNS=$(bashio::config 'forecast_runs')
-
 # HA-Core-API über den Supervisor-Proxy (kein Long-Lived-Token nötig)
 export HA_BASE_URL="http://supervisor/core"
 export HA_TOKEN="${SUPERVISOR_TOKEN}"
-export HP_TWIN_TOPOLOGY="/config/${TOPOLOGY}"
-export HP_TWIN_MODEL="/config/${MODEL}"
-export HP_TWIN_RUNS="${RUNS}"
-
-# Beim ersten Start Vorlagen nach /config legen, falls noch keine da sind
-if [ ! -f "/config/${TOPOLOGY}" ]; then
-  mkdir -p "$(dirname "/config/${TOPOLOGY}")"
-  python -c "import importlib.resources" 2>/dev/null || true
-  bashio::log.warning "Keine Konfiguration unter /config/${TOPOLOGY} gefunden."
-  bashio::log.warning "Bitte config/ (example_topology.yaml, model.yaml, ha_mapping.yaml, heizlast.yaml) nach /config kopieren."
-fi
 
 cd /config
-INGRESS_ENTRY=$(bashio::addon.ingress_entry)
-bashio::log.info "hp-twin startet auf Ingress ${INGRESS_ENTRY} (Topologie ${TOPOLOGY}, ${RUNS} MC-Läufe)"
+mkdir -p config data/ha_export
+
+# Beim ersten Start die Add-on-Optionen als Startwerte in runtime.json übernehmen.
+if [ ! -f config/runtime.json ]; then
+  bashio::log.info "Erster Start: schreibe Startwerte nach /config/config/runtime.json"
+  EOS_URL="$(bashio::config 'eos_base_url')" \
+  EOS_ID="$(bashio::config 'eos_managed_load_id')" \
+  RUNS="$(bashio::config 'forecast_runs')" \
+  HORIZON="$(bashio::config 'horizon_h')" \
+  DHW_CAP="$(bashio::config 'dhw_setpoint_cap_c')" \
+  AUTO="$(bashio::config 'auto_push_enabled')" \
+  python - <<'PY'
+import os
+from hp_twin.adapters.settings import RuntimeSettings
+cap = os.environ.get("DHW_CAP", "")
+RuntimeSettings(
+    eos_base_url=os.environ.get("EOS_URL", ""),
+    eos_managed_load_id=os.environ.get("EOS_ID", ""),
+    forecast_runs=int(float(os.environ["RUNS"])),
+    horizon_h=float(os.environ["HORIZON"]),
+    dhw_setpoint_cap_c=float(cap) if cap not in ("", "null") else None,
+    auto_push_enabled=os.environ.get("AUTO") == "true",
+).save("config/runtime.json")
+PY
+fi
+
+if [ ! -f config/ha_mapping.yaml ]; then
+  bashio::log.warning "Noch keine Konfiguration (ha_mapping/topology/heizlast) vorhanden."
+  bashio::log.warning "Im Dashboard unter 'Portable Konfiguration' ein Config-Bundle importieren"
+  bashio::log.warning "(hp-twin-config.json aus deiner bestehenden Installation)."
+fi
+
+INGRESS_ENTRY="$(bashio::addon.ingress_entry)"
+bashio::log.info "hp-twin startet (Ingress ${INGRESS_ENTRY})"
 exec uvicorn hp_twin.api.app:app --host 0.0.0.0 --port 8000 --root-path "${INGRESS_ENTRY}"

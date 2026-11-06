@@ -225,7 +225,11 @@ def _cmd_backtest(args: argparse.Namespace) -> int:
 
 
 def _plot_replay(rep: Any, met: Any, out: str) -> None:
-    import matplotlib
+    try:
+        import matplotlib
+    except ImportError:
+        print('  (Plot übersprungen: pip install "hp-twin[plots]" für matplotlib)')
+        return
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
