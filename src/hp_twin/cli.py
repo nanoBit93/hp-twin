@@ -123,10 +123,12 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
 
 
 def resolve_calibration(settings: Any, model: Any):  # type: ignore[no-untyped-def]
-    """Liefert (topo, df, calib): gespeicherte Kalibrierung ODER frisch aus CSV gefittet.
+    """Liefert (topo, df, calib).
 
-    Bei Fit aus CSV wird die Kalibrierung zusätzlich nach settings.calibration_path gespeichert
-    (damit sie ins Bundle exportiert werden kann).
+    Gespeicherte Kalibrierung, wenn (a) `use_stored_calibration` gesetzt ist ODER (b) die Historie
+    kürzer als `min_fit_days` ist (ein Fit aus wenigen Stunden liefert unbrauchbare Werte).
+    Sonst wird aus der CSV gefittet und das Ergebnis nach `calibration_path` gespeichert
+    (für den Bundle-Export). Ein Fit aus zu kurzer Historie wird nie gespeichert.
     """
     import json
 
@@ -134,16 +136,32 @@ def resolve_calibration(settings: Any, model: Any):  # type: ignore[no-untyped-d
     from hp_twin.domain.calibration import calibration_from_json, calibration_to_json
 
     topo = load_topology(settings.topology_path)
-    if settings.use_stored_calibration and Path(settings.calibration_path).exists():
-        calib = calibration_from_json(
-            json.loads(Path(settings.calibration_path).read_text("utf-8"))
+    csv = Path(settings.csv_path)
+    df = read_measurements(csv) if csv.exists() else None
+    span_days = (
+        (df.index[-1] - df.index[0]).total_seconds() / 86400.0
+        if df is not None and len(df) > 1
+        else 0.0
+    )
+    stored = Path(settings.calibration_path)
+    too_short = span_days < model.calibration.min_fit_days
+    if stored.exists() and (settings.use_stored_calibration or too_short):
+        calib = calibration_from_json(json.loads(stored.read_text("utf-8")))
+        calib.notes.append(
+            f"gespeicherte Kalibrierung genutzt (Historie {span_days:.1f} d, "
+            f"Mindestens {model.calibration.min_fit_days:g} d für einen neuen Fit)"
         )
-        df = read_measurements(settings.csv_path) if Path(settings.csv_path).exists() else None
         return topo, df, calib
     topo, df, calib = _calibrate_report(settings.topology_path, settings.csv_path, model=model)
-    out = Path(settings.calibration_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(calibration_to_json(calib), indent=2, ensure_ascii=False), "utf-8")
+    if too_short:
+        calib.notes.append(
+            f"WARNUNG: nur {span_days:.1f} d Historie, Kalibrierung unsicher (nicht gespeichert)"
+        )
+    else:
+        stored.parent.mkdir(parents=True, exist_ok=True)
+        stored.write_text(
+            json.dumps(calibration_to_json(calib), indent=2, ensure_ascii=False), "utf-8"
+        )
     return topo, df, calib
 
 
@@ -264,7 +282,7 @@ def _plot_replay(rep: Any, met: Any, out: str) -> None:
 def _cmd_forecast(args: argparse.Namespace) -> int:
     import json
 
-    from hp_twin.adapters.forecast import run_forecast
+    from hp_twin.adapters.forecast import run_forecast, run_live_forecast
     from hp_twin.domain.model_config import ModelConfig
 
     model = ModelConfig.from_path(args.model)
@@ -273,9 +291,10 @@ def _cmd_forecast(args: argparse.Namespace) -> int:
     model.forecast.dhw_setpoint_cap_c = args.dhw_cap
     model.forecast.eos_ttl_minutes = args.ttl_minutes
     topo, df, calib = _calibrate_report(args.topology, args.csv, model=model)
-    start_idx = len(df) - int(round(args.horizon_h * 60)) - 1 if args.from_end else 0
-    start_idx = max(start_idx, 0)
-    fc = run_forecast(df, topo, calib, start_idx, horizon_h=args.horizon_h, model=model)
+    if args.replay:  # Debug: Replay ab Datenanfang mit gemessenem Wetter
+        fc = run_forecast(df, topo, calib, 0, horizon_h=args.horizon_h, model=model)
+    else:  # echte Prognose ab dem letzten Messpunkt
+        fc = run_live_forecast(df, topo, calib, horizon_h=args.horizon_h, model=model)
     out = {
         "n_events": len(fc.events),
         "expected_energy_kwh": round(float(fc.slots.energy_wh.sum()) / 1000, 2),
@@ -294,7 +313,7 @@ def _cmd_push(args: argparse.Namespace) -> int:
     import os
 
     from hp_twin.adapters.eos_connect import push_rest
-    from hp_twin.adapters.forecast import run_forecast
+    from hp_twin.adapters.forecast import run_live_forecast
     from hp_twin.domain.model_config import ModelConfig
 
     model = ModelConfig.from_path(args.model)
@@ -302,8 +321,7 @@ def _cmd_push(args: argparse.Namespace) -> int:
     model.forecast.dhw_setpoint_cap_c = args.dhw_cap
     model.forecast.eos_ttl_minutes = args.ttl_minutes
     topo, df, calib = _calibrate_report(args.topology, args.csv, model=model)
-    start_idx = max(len(df) - int(round(args.horizon_h * 60)) - 1, 0)
-    fc = run_forecast(df, topo, calib, start_idx, horizon_h=args.horizon_h, model=model)
+    fc = run_live_forecast(df, topo, calib, horizon_h=args.horizon_h, model=model)
     token = os.environ.get("EOS_TOKEN")
     status = push_rest(args.eos_url, args.managed_load_id, fc.eos, token=token)
     print(
@@ -378,7 +396,9 @@ def main(argv: list[str] | None = None) -> int:
     fc.add_argument("--runs", type=int, default=100)
     fc.add_argument("--dhw-cap", type=float, default=45.0)
     fc.add_argument("--ttl-minutes", type=int, default=None)
-    fc.add_argument("--from-end", action="store_true", help="Startzustand = Ende der CSV")
+    fc.add_argument(
+        "--replay", action="store_true", help="Debug: Replay ab Datenanfang statt Live-Prognose"
+    )
     fc.add_argument("--out", default=None)
     fc.add_argument("--model", default="config/model.yaml")
     fc.set_defaults(func=_cmd_forecast)

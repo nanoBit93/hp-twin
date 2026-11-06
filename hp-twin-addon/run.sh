@@ -38,6 +38,6 @@ if [ ! -f config/ha_mapping.yaml ]; then
   bashio::log.warning "(hp-twin-config.json aus deiner bestehenden Installation)."
 fi
 
-INGRESS_ENTRY="$(bashio::addon.ingress_entry)"
+INGRESS_ENTRY="$(bashio::app.ingress_entry)"
 bashio::log.info "hp-twin startet (Ingress ${INGRESS_ENTRY})"
 exec uvicorn hp_twin.api.app:app --host 0.0.0.0 --port 8000 --root-path "${INGRESS_ENTRY}"

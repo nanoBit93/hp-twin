@@ -45,6 +45,10 @@ class RuntimeSettings(BaseModel):
     schedule_interval_minutes: float = Field(default=15.0, ge=1)
     export_before_push: bool = True
     export_window_hours: float = Field(default=6.0, gt=0, description="Export-Fenster je Zyklus")
+    backfill_days: float = Field(
+        default=10.0, gt=0, description="Historie beim ersten Start/nach Lücke"
+    )
+    min_history_days: float = Field(default=3.0, gt=0, description="darunter wird nachgeladen")
 
     @classmethod
     def load(cls, path: str | None = None) -> RuntimeSettings:

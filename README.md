@@ -40,7 +40,7 @@ cp config/model.example.yaml      config/model.yaml        # Parameter (optional
    Periodisch (Cron, täglich 03:00): `hp-twin export --days 2 --append --out data/ha_export/measurements.csv`
 2. **Kalibrieren** (WP-Kennfeld, Regler-Schwellen, Gebäude-UA): `hp-twin calibrate config/example_topology.yaml`
 3. **Backtest** gegen die Realität: `hp-twin backtest config/example_topology.yaml --plot data/ha_export/backtest.png`
-4. **Prognose** (48 h, Monte-Carlo): `hp-twin forecast config/example_topology.yaml --from-end --runs 100`
+4. **Prognose** (48 h, Monte-Carlo, ab letztem Messpunkt): `hp-twin forecast config/example_topology.yaml --runs 100`
 5. **An EOS Connect senden**: `hp-twin push config/example_topology.yaml http://<eos-host>:8080 <managed_load_id>`
    (Token optional über `EOS_TOKEN`.)
 
@@ -59,10 +59,17 @@ Im Dashboard unter **„⚙️ Automatik & EOS-Connect-Verbindung"** einstellbar
 - EOS Basis-URL, Managed-Load-ID, optional Token; MC-Läufe, Horizont, DHW-Cap, Export-Fenster, Intervall.
 - **Automatik aktiv** → ein Hintergrund-Scheduler fährt zyklisch: frischer HA-Export → Kalibrierung →
   Prognose → EOS-Push. **„Push jetzt"** / **„Dry-Run"** lösen sofort einen Zyklus aus.
-- **Start-Abgleich**: Vor jedem Push wird ein kurzes Fenster frisch exportiert, sodass der simulierte
-  Startzustand ≈ „jetzt" ist. Das **Datenalter** wird im Status angezeigt (grün = synchron < 30 min);
-  der EOS-Payload wird mit `"start":"now"` gesendet → beide Systeme teilen dieselbe Zeitachse.
-- Endpunkte: `GET/POST /api/settings`, `POST /api/push_now` (`{"push":false}` = Dry-Run), `GET /api/status`.
+- **Echte Vorwärtsprognose ab „jetzt"**: Vor jedem Push wird frisch exportiert. Der Startzustand
+  (Puffer-/DHW-Temperatur, Reglerzustand inkl. Mindeststillstand) kommt aus dem **letzten Messpunkt**,
+  die Simulation läuft von dort 48 h in die Zukunft. Die zukünftigen **Eingänge** (Außentemperatur,
+  Strahlung, Heizkurven-/Raumsollwerte, SG) sind eine **Näherung: die letzten 24 h, täglich wiederholt**
+  („gestern wie heute") – ein Wetterprognose-Adapter kann sie später ersetzen. Das Datenalter steht im Status.
+- **Erster Start / Lücken**: Fehlt Historie (< `min_history_days`), lädt der Zyklus automatisch
+  `backfill_days` (Default 10) aus HA nach – im Hintergrund, Fortschritt im Status. Größere Lücken
+  starten die Historie neu.
+- **Kalibrierung**: Bei < `min_fit_days` (Default 5) Historie wird die mitgelieferte/gespeicherte
+  Kalibrierung benutzt (Bundle-Import) statt aus wenigen Stunden zu fitten.
+- Endpunkte: `GET/POST /api/settings`, `POST /api/push_now` (startet im Hintergrund; `{"push":false}` = Dry-Run), `GET /api/status`.
 
 ## Portable Konfiguration (Export/Import)
 Gesamte Konfiguration (+ optional Kalibrierung) als **eine Datei** sichern und in einer neuen

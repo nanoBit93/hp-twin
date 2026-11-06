@@ -28,6 +28,7 @@ class ServiceStatus:
     data_age_minutes: float | None = None
     exported_rows: int | None = None
     running: bool = False
+    phase: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +42,7 @@ class ServiceStatus:
             "data_age_minutes": self.data_age_minutes,
             "exported_rows": self.exported_rows,
             "running": self.running,
+            "phase": self.phase,
             **self.extra,
         }
 
@@ -66,14 +68,47 @@ def missing_config(settings: RuntimeSettings) -> list[str]:
     return [f for f in need if not Path(f).exists()]
 
 
-def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
-    """Führt einen Automatik-Zyklus aus und liefert den Status zurück."""
+def history_span_days(csv_path: str) -> float:
+    """Zeitliche Länge der vorhandenen Messdaten in Tagen (0 = keine)."""
+    p = Path(csv_path)
+    if not p.exists():
+        return 0.0
+    try:
+        ts = pd.to_datetime(pd.read_csv(p, usecols=["timestamp"])["timestamp"], utc=True)
+        return float((ts.iloc[-1] - ts.iloc[0]).total_seconds() / 86400.0)
+    except Exception:  # pragma: no cover - defensive
+        return 0.0
+
+
+def plan_export(settings: RuntimeSettings) -> tuple[float, bool, str]:
+    """Wieviel exportiert wird: (Tage, anhängen?, Phase).
+
+    - keine/zu kurze Historie -> Backfill der letzten `backfill_days`
+    - Lücke zu groß für den HA-Recorder -> neu beginnen (sonst ungleichmäßiges Raster)
+    - sonst nur das Delta seit dem letzten Messpunkt (mind. `export_window_hours`)
+    """
+    age_min = data_age_minutes(settings.csv_path)
+    if age_min is None or history_span_days(settings.csv_path) < settings.min_history_days:
+        return settings.backfill_days, False, "Historie laden"
+    if age_min / 1440.0 > 0.9 * settings.backfill_days:
+        return settings.backfill_days, False, "Historie neu laden (Lücke)"
+    hours = max(settings.export_window_hours, age_min / 60.0 + 1.0)
+    return hours / 24.0, True, "Export"
+
+
+def run_cycle(
+    settings: RuntimeSettings, do_push: bool = True, status: ServiceStatus | None = None
+) -> ServiceStatus:
+    """Ein Automatik-Zyklus. Aktualisiert `status` fortlaufend (für die Fortschrittsanzeige)."""
     from hp_twin.adapters.eos_connect import push_rest
-    from hp_twin.adapters.forecast import run_forecast
+    from hp_twin.adapters.forecast import run_live_forecast
     from hp_twin.adapters.ha_history import export_to_csv
+    from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
-    st = ServiceStatus(running=True, last_run_iso=datetime.now(UTC).isoformat())
+    st = status or ServiceStatus()
+    st.running, st.ok, st.error, st.http_status = True, False, None, None
+    st.last_run_iso = datetime.now(UTC).isoformat()
     try:
         settings.apply_ha_env()  # HA-Zugang aus den Settings (überschreibt .env)
         missing = missing_config(settings)
@@ -83,19 +118,20 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
                 + ", ".join(missing)
                 + " – im Dashboard unter 'Portable Konfiguration' ein Config-Bundle importieren."
             )
-        # 1) frischer Export (Startzustand ~ jetzt)
+        # 1) Export: Backfill / Lückenschluss / Delta  (Startzustand = jetzt)
         if settings.export_before_push and Path(settings.ha_mapping_path).exists():
+            days, append, phase = plan_export(settings)
+            st.phase = f"{phase} ({days:.1f} d)"
             st.exported_rows = export_to_csv(
                 settings.ha_mapping_path,
                 settings.env_path,
-                days=settings.export_window_hours / 24.0,
+                days=days,
                 out_path=settings.csv_path,
-                append=True,
+                append=append,
             )
 
         # 2) Modell + Kalibrierung (gespeichert oder frisch aus CSV)
-        from hp_twin.cli import resolve_calibration
-
+        st.phase = "Kalibrierung"
         model = ModelConfig.from_path(settings.model_path)
         model.montecarlo.n_runs = settings.forecast_runs
         model.forecast.dhw_setpoint_cap_c = settings.dhw_setpoint_cap_c
@@ -104,15 +140,16 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
         if df is None:
             raise ValueError("Keine Messdaten (CSV) vorhanden – Export zuerst durchführen")
 
-        # 3) Prognose ab Startzustand = Ende der (frischen) Daten
-        start_idx = max(len(df) - int(round(settings.horizon_h * 60)) - 1, 0)
-        fc = run_forecast(df, topo, calib, start_idx, horizon_h=settings.horizon_h, model=model)
+        # 3) ECHTE Vorwärtsprognose ab dem letzten Messpunkt
+        st.phase = "Prognose"
+        fc = run_live_forecast(df, topo, calib, horizon_h=settings.horizon_h, model=model)
         st.n_events = len(fc.events)
         st.planned_kwh = round(float(fc.slots.energy_wh.sum()) / 1000, 2)
         st.data_age_minutes = data_age_minutes(settings.csv_path)
 
         # 4) Push an EOS Connect
         if do_push:
+            st.phase = "Push an EOS"
             if not settings.eos_base_url or not settings.eos_managed_load_id:
                 raise ValueError("EOS-Verbindung unvollständig (base_url / managed_load_id)")
             st.http_status = push_rest(
@@ -127,4 +164,5 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
         st.ok = False
     finally:
         st.running = False
+        st.phase = None
     return st

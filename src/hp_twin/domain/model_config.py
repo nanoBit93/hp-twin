@@ -52,6 +52,9 @@ class CalibrationParams(_Model):
         default=2.0, ge=0, description="Filter: eingeschwungener Betrieb"
     )
     op_min_p_el_w: float = Field(default=500.0, ge=0)
+    min_fit_days: float = Field(
+        default=5.0, gt=0, description="weniger Historie: gespeicherte Kalibrierung nutzen"
+    )
 
 
 class MonteCarloParams(_Model):

@@ -6,6 +6,7 @@ Startzustand aus Messdaten, Vorwärtssimulation mit GEMESSENEM Wetter und GEMESS
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from hp_twin.adapters.io_csv import room_columns
 from hp_twin.domain.building import RC2R2C, BuildingState
 from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.consumers import CompositeLoad, HeatingCircuitLoad, MultiZoneHeatingLoad
-from hp_twin.domain.controller import Controller, Setpoints
+from hp_twin.domain.controller import Controller, ControllerState, Mode, Setpoints
 from hp_twin.domain.model_config import ModelConfig
 from hp_twin.domain.simulator import SimConfig, SimResult, Simulator
 from hp_twin.domain.storage import StorageState, StratifiedStorage
@@ -64,6 +65,66 @@ def _ua_split(
     return ua_air_out, ua_air_mass, 1.0 / inv
 
 
+def initial_controller_state(df: pd.DataFrame, min_off_s: float) -> ControllerState:
+    """Reglerzustand "jetzt" aus der Historie: läuft die WP, bzw. wie lange steht sie schon.
+
+    Entscheidend für den Zeitpunkt des nächsten Starts (Mindeststillstand/Pause).
+    """
+    dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
+    on = df["compressor_on"].fillna(0).to_numpy().astype(int)
+    if len(on) == 0 or not on.any():
+        return ControllerState()  # nie gelaufen -> darf sofort starten
+    if on[-1] == 1:
+        start = len(on) - 1
+        while start > 0 and on[start - 1] == 1:
+            start -= 1
+        dhw = str(df["mode"].iloc[-1]) == "dhw"
+        return ControllerState(
+            mode=Mode.HEAT_DHW if dhw else Mode.HEAT_BUFFER,
+            time_in_mode_s=(len(on) - 1 - start) * dt_s,
+            time_since_stop_s=0.0,
+            active_node="dhw" if dhw else "buffer",
+        )
+    last_on = int(np.where(on == 1)[0][-1])
+    since_stop = (len(on) - 1 - last_on) * dt_s
+    return ControllerState(
+        mode=Mode.PAUSE if since_stop < min_off_s else Mode.IDLE,
+        time_in_mode_s=since_stop,
+        time_since_stop_s=since_stop,
+    )
+
+
+def build_forecast_frame(df: pd.DataFrame, horizon_h: float) -> pd.DataFrame:
+    """Eingangsrahmen für eine ECHTE Vorwärtsprognose ab dem letzten Messpunkt.
+
+    Anfangszustand = letzte Messwerte (Speicher). Zukünftige Eingänge (Außentemperatur, Strahlung,
+    Soll-/Raumsollwerte, SG) = die letzten 24 h, täglich wiederholt ("gestern wie heute"). Das ist
+    eine Näherung; ein Wetterprognose-Adapter kann diese Spalten später ersetzen.
+    """
+    dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
+    per_day = int(round(86400.0 / dt_s))
+    if len(df) < per_day:
+        raise ValueError("Für die Prognose werden mindestens 24 h Messdaten benötigt")
+    n = int(round(horizon_h * 3600.0 / dt_s))
+    d24 = df.iloc[-per_day:]
+    idx = (np.arange(1, n + 1) - 1) % per_day
+    fut = d24.iloc[idx].copy()
+    fut.index = df.index[-1] + pd.to_timedelta(np.arange(1, n + 1) * dt_s, unit="s")
+    last = df.iloc[-1]
+    # Messgrößen der Zukunft gibt es nicht; Anfangszustand = jetzt gemessen
+    for col in ("t_dhw_c", "t_hk1_c", "t_hk2_c", "compressor_on", "p_el_w", "q_heat_wh"):
+        if col in fut.columns:
+            fut[col] = np.nan
+    fut["t_dhw_c"] = fut["t_dhw_c"].astype(float)
+    fut["t_hk1_c"] = fut["t_hk1_c"].astype(float)
+    first = fut.index[0]
+    fut.loc[first, "t_dhw_c"] = last["t_dhw_c"]
+    fut.loc[first, "t_hk1_c"] = last["t_hk1_c"]
+    for col in room_columns(fut.reset_index()):
+        fut[col] = last[col]
+    return fut
+
+
 def build_replay(
     df: pd.DataFrame,
     topology: Topology,
@@ -77,6 +138,7 @@ def build_replay(
     dhw_setpoint_cap_c: float | None = None,
     demand_scale: float = 1.0,
     model: ModelConfig | None = None,
+    ctrl_state: ControllerState | None = None,
 ) -> ReplayOutput:
     model = model or ModelConfig()
     lp = model.load
@@ -235,5 +297,11 @@ def build_replay(
         SimConfig(timestep_s=dt_s, horizon_s=n * dt_s),
         condenser_approach_k=model.sim.condenser_approach_k,
     )
-    result = sim.run(state0, setpoints=setpoints, load=load, outdoor=outdoor)
+    result = sim.run(
+        state0,
+        setpoints=setpoints,
+        load=load,
+        outdoor=outdoor,
+        ctrl_state=copy.copy(ctrl_state) if ctrl_state is not None else None,
+    )
     return ReplayOutput(result=result, measured=sl, buffer_node=buffer_node, dhw_node=dhw_node)

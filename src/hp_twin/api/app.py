@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,18 @@ from hp_twin.adapters.settings import RuntimeSettings
 
 _STATIC = Path(__file__).parent / "static"
 _STATUS = ServiceStatus()
+_RUN_LOCK = threading.Lock()
+
+
+def _run_locked(settings: RuntimeSettings, do_push: bool) -> bool:
+    """Führt einen Zyklus aus, solange nicht schon einer läuft. Aktualisiert _STATUS in place."""
+    if not _RUN_LOCK.acquire(blocking=False):
+        return False
+    try:
+        run_cycle(settings, do_push, status=_STATUS)
+    finally:
+        _RUN_LOCK.release()
+    return True
 
 
 async def _scheduler(app: FastAPI) -> None:
@@ -25,11 +38,7 @@ async def _scheduler(app: FastAPI) -> None:
         settings = RuntimeSettings.load()
         interval = max(settings.schedule_interval_minutes, 1.0) * 60.0
         if settings.auto_push_enabled:
-            try:
-                st = await asyncio.get_event_loop().run_in_executor(None, run_cycle, settings, True)
-                globals()["_STATUS"] = st
-            except Exception as e:  # pragma: no cover - defensive
-                _STATUS.error = str(e)
+            await asyncio.get_event_loop().run_in_executor(None, _run_locked, settings, True)
         await asyncio.sleep(interval)
 
 
@@ -51,38 +60,29 @@ def dashboard() -> FileResponse:
 
 
 @app.get("/api/analysis")
-def analysis(
-    topology_path: str = "config/example_topology.yaml",
-    csv_path: str = "data/ha_export/measurements.csv",
-    model_path: str = "config/model.yaml",
-    runs: int = 50,
-    horizon_h: float = 48.0,
-    from_end: bool = True,
-) -> dict[str, Any]:
+def analysis(runs: int = 50, horizon_h: float = 48.0, from_end: bool = True) -> dict[str, Any]:
+    """Analyse-Bundle. from_end=true: echte Prognose ab jetzt; false: Replay ab Datenanfang."""
     from hp_twin.adapters.analysis import build_analysis
-    from hp_twin.cli import _calibrate_report
+    from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
-    model = ModelConfig.from_path(model_path)
+    settings = RuntimeSettings.load()
+    model = ModelConfig.from_path(settings.model_path)
     model.montecarlo.n_runs = runs
     model.sim.horizon_h = horizon_h
+    model.forecast.dhw_setpoint_cap_c = settings.dhw_setpoint_cap_c
     try:
-        topo, df, calib = _calibrate_report(topology_path, csv_path, model=model)
-    except FileNotFoundError as e:  # pragma: no cover - IO-abhängig
+        topo, df, calib = resolve_calibration(settings, model)
+    except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    start_idx = max(len(df) - int(round(horizon_h * 60)) - 1, 0) if from_end else 0
-    return build_analysis(df, topo, calib, start_idx, model)
-
-
-class SimulateRequest(BaseModel):
-    topology_path: str = "config/example_topology.yaml"
-    csv_path: str = "data/ha_export/measurements.csv"
-    model_path: str = "config/model.yaml"
-    horizon_h: float = Field(default=48.0, gt=0)
-    runs: int = Field(default=100, ge=1)
-    dhw_setpoint_cap_c: float | None = 45.0
-    ttl_minutes: int | None = None
-    from_end: bool = True
+    if df is None:
+        raise HTTPException(
+            status_code=404, detail="Keine Messdaten (CSV) – erst 'Push jetzt'/Dry-Run"
+        )
+    try:
+        return build_analysis(df, topo, calib, model, live=from_end)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 @app.get("/health")
@@ -138,7 +138,8 @@ def post_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
     try:
         result = apply_bundle(bundle, RuntimeSettings.load())
-        globals()["_STATUS"] = ServiceStatus()  # alten Fehler (z. B. fehlende Config) verwerfen
+        if not _RUN_LOCK.locked():  # alten Fehler (z. B. fehlende Config) verwerfen
+            _STATUS.error, _STATUS.ok = None, False
         return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -184,29 +185,52 @@ def status() -> dict[str, Any]:
 
 
 @app.post("/api/push_now")
-async def push_now(body: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Führt sofort einen Zyklus aus (Export->Forecast->Push). body={"push":false} = Dry-Run."""
+def push_now(body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Startet sofort einen Zyklus im HINTERGRUND (Export->Forecast->Push) und kehrt zurück.
+
+    Ein Backfill kann Minuten dauern; Fortschritt und Ergebnis über GET /api/status.
+    body={"push":false} = Dry-Run.
+    """
     settings = RuntimeSettings.load()
     do_push = True if body is None else bool(body.get("push", True))
-    st = await asyncio.get_event_loop().run_in_executor(None, run_cycle, settings, do_push)
-    globals()["_STATUS"] = st
-    return st.to_dict()
+    if _RUN_LOCK.locked():
+        return {**_STATUS.to_dict(), "already_running": True}
+    _STATUS.running, _STATUS.phase = True, "Start"
+    threading.Thread(target=_run_locked, args=(settings, do_push), daemon=True).start()
+    return _STATUS.to_dict()
+
+
+class SimulateRequest(BaseModel):
+    topology_path: str = "config/example_topology.yaml"
+    csv_path: str = "data/ha_export/measurements.csv"
+    model_path: str = "config/model.yaml"
+    horizon_h: float = Field(default=48.0, gt=0)
+    runs: int = Field(default=100, ge=1)
+    dhw_setpoint_cap_c: float | None = 45.0
+    ttl_minutes: int | None = None
+    from_end: bool = True
 
 
 @app.post("/simulate")
 def simulate(req: SimulateRequest) -> dict[str, Any]:
-    from hp_twin.adapters.forecast import run_forecast
-    from hp_twin.cli import _calibrate_report
+    from hp_twin.adapters.forecast import run_forecast, run_live_forecast
+    from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
+    settings = RuntimeSettings.load()
+    settings.topology_path, settings.csv_path = req.topology_path, req.csv_path
     model = ModelConfig.from_path(req.model_path)
     model.montecarlo.n_runs = req.runs
     model.forecast.dhw_setpoint_cap_c = req.dhw_setpoint_cap_c
     model.forecast.eos_ttl_minutes = req.ttl_minutes
     try:
-        topo, df, calib = _calibrate_report(req.topology_path, req.csv_path, model=model)
+        topo, df, calib = resolve_calibration(settings, model)
     except FileNotFoundError as e:  # pragma: no cover - IO-abhängig
         raise HTTPException(status_code=404, detail=str(e)) from e
-    start_idx = max(len(df) - int(round(req.horizon_h * 60)) - 1, 0) if req.from_end else 0
-    fc = run_forecast(df, topo, calib, start_idx, horizon_h=req.horizon_h, model=model)
+    if df is None:
+        raise HTTPException(status_code=404, detail="Keine Messdaten (CSV)")
+    if req.from_end:  # echte Prognose ab jetzt
+        fc = run_live_forecast(df, topo, calib, horizon_h=req.horizon_h, model=model)
+    else:  # Replay ab Datenanfang (Debug)
+        fc = run_forecast(df, topo, calib, 0, horizon_h=req.horizon_h, model=model)
     return {"n_events": len(fc.events), **fc.to_dict()}

@@ -30,6 +30,7 @@ OPTIONAL_COLUMNS: dict[str, tuple[str, str]] = {
     "t_outdoor_fc_c": ("°C", "Außentemperatur-Prognose"),
     "circuit_active": ("-", "hk1|hk2|dhw|none"),
 }
+GAP_FILL_LIMIT = 60  # max. Schritte (Minuten), die aufgefüllt werden
 ROOM_PREFIX, ROOM_SUFFIX = "t_room_", "_c"  # t_room_<name>_c
 
 
@@ -49,6 +50,8 @@ def validate_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out[TIME_COLUMN] = pd.to_datetime(out[TIME_COLUMN], utc=True)
     out = out.set_index(TIME_COLUMN).sort_index()
+    # Kurze Sensorlücken (z. B. letzte Minuten eines Exports) füllen, sonst schlagen NaN in die Fits
+    out = out.ffill(limit=GAP_FILL_LIMIT).bfill(limit=GAP_FILL_LIMIT)
     if out.index.has_duplicates:
         raise CsvSchemaError("Doppelte Zeitstempel")
     if not room_columns(out.reset_index()):

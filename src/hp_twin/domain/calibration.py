@@ -173,9 +173,13 @@ def fit_discharge(
             continue
         discharge_w = c_buffer * (tb[s] - tb[s + w]) / window_s
         if discharge_w > 0 and np.isfinite(discharge_w):
+            d_mean = float(np.mean(drv[seg]))
+            g_mean = float(np.mean(ghi[seg])) if ghi is not None else 0.0
+            if not (np.isfinite(d_mean) and np.isfinite(g_mean)):
+                continue  # Fenster mit Sensorlücke nicht verwenden
             disch_pts.append(discharge_w)
-            drv_pts.append(float(np.mean(drv[seg])))
-            ghi_pts.append(float(np.mean(ghi[seg])) if ghi is not None else 0.0)
+            drv_pts.append(d_mean)
+            ghi_pts.append(g_mean)
 
     if len(disch_pts) < 10:
         return DischargeFit(0.0, 0.0, 0.0, len(disch_pts), float("nan"))

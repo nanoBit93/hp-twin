@@ -3,6 +3,9 @@
 Liefert alles, was zum Troubleshooting nötig ist: Kalibrierparameter (wie die Berechnung
 zustande kommt), die Eingangs-Zeitreihen (Wetter, Sollwerte, SG, aktive Räume), den
 deterministischen Simulationsverlauf (Puffer, P_el, Modus) und die Monte-Carlo-Prognose.
+
+live=True: echte Vorwärtsprognose ab dem letzten Messpunkt (Eingänge = letzte 24 h wiederholt),
+dazu die letzten 24 h Messung als Kontext. live=False: Replay ab Datenanfang mit gemessenem Wetter.
 """
 
 from __future__ import annotations
@@ -12,35 +15,41 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hp_twin.adapters.forecast import run_forecast
-from hp_twin.adapters.replay import build_replay
+from hp_twin.adapters.forecast import run_forecast, run_live_forecast
+from hp_twin.adapters.replay import build_forecast_frame, build_replay, initial_controller_state
 from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.model_config import ModelConfig
 from hp_twin.domain.topology import Topology
 
 
-def _series(a: Any, nd: int = 1) -> list[float]:
-    return [round(float(x), nd) for x in np.asarray(a, dtype=float)]
+def _series(a: Any, nd: int = 1) -> list[float | None]:
+    """Zeitreihe als JSON-taugliche Liste (NaN/inf -> None)."""
+    arr = np.asarray(a, dtype=float)
+    return [round(float(x), nd) if np.isfinite(x) else None for x in arr]
 
 
 def build_analysis(
     df: pd.DataFrame,
     topology: Topology,
     calib: CalibrationReport,
-    start_idx: int,
     model: ModelConfig,
+    live: bool = True,
+    start_idx: int = 0,
 ) -> dict[str, Any]:
     horizon_h = model.sim.horizon_h
-    det = build_replay(
-        df,
-        topology,
-        calib,
-        start_idx,
-        horizon_h,
-        dhw_setpoint_cap_c=model.forecast.dhw_setpoint_cap_c,
-        model=model,
-    )
-    fc = run_forecast(df, topology, calib, start_idx, horizon_h=horizon_h, model=model)
+    cap = model.forecast.dhw_setpoint_cap_c
+    if live:
+        frame = build_forecast_frame(df, horizon_h)
+        cs = initial_controller_state(df, topology.controller.min_off_s)
+        det = build_replay(
+            frame, topology, calib, 0, horizon_h, dhw_setpoint_cap_c=cap, model=model, ctrl_state=cs
+        )
+        fc = run_live_forecast(df, topology, calib, horizon_h=horizon_h, model=model)
+    else:
+        det = build_replay(
+            df, topology, calib, start_idx, horizon_h, dhw_setpoint_cap_c=cap, model=model
+        )
+        fc = run_forecast(df, topology, calib, start_idx, horizon_h=horizon_h, model=model)
     res, sl = det.result, det.measured
     n = len(res.time_s)
     hours = _series(res.time_s / 3600.0, 3)
@@ -75,9 +84,26 @@ def build_analysis(
         "mode": res.mode,
     }
 
-    slot_hours = _series(fc.slots.slot_start_s / 3600.0, 3)
+    # Kontext: die letzten 24 h Messung (negative Stunden = Vergangenheit)
+    history: dict[str, Any] = {}
+    if live:
+        dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
+        h24 = df.iloc[-int(round(86400 / dt_s)) :]
+        history = {
+            "hours": _series(-(len(h24) - 1 - np.arange(len(h24))) * dt_s / 3600.0, 3),
+            "buffer_meas_c": _series(h24["t_hk1_c"].to_numpy()),
+            "dhw_meas_c": _series(h24["t_dhw_c"].to_numpy()),
+            "p_el_w": _series(h24["p_el_w"].to_numpy(), 0),
+        }
+
     forecast = {
-        "slot_hours": slot_hours,
+        "mode": "live" if live else "replay",
+        "start_state": {
+            "buffer_c": round(float(df["t_hk1_c"].iloc[-1]), 1),
+            "dhw_c": round(float(df["t_dhw_c"].iloc[-1]), 1),
+            "last_measurement": str(df.index[-1]),
+        },
+        "slot_hours": _series(fc.slots.slot_start_s / 3600.0, 3),
         "p_el_mean_w": _series(fc.slots.p_el_mean_w, 0),
         "p_el_p10_w": _series(fc.slots.p_el_p10_w, 0),
         "p_el_p90_w": _series(fc.slots.p_el_p90_w, 0),
@@ -93,5 +119,6 @@ def build_analysis(
         "calibration": calib.to_dict(),
         "factors": factors,
         "sim": sim,
+        "history": history,
         "forecast": forecast,
     }

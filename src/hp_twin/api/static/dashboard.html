@@ -89,12 +89,13 @@
     <div class="kpis" id="kpis"></div>
 
     <div class="panel"><h2>Lastprognose (Monte-Carlo): P_el Erwartungswert + P10–P90</h2>
+      <div id="fcNote" style="color:var(--muted);font-size:12px;margin-bottom:6px"></div>
       <div id="chartForecast" class="chart"></div></div>
 
     <div class="panel"><h2>Laufwahrscheinlichkeit je 15-min-Slot</h2>
       <div id="chartProb" class="chart" style="height:200px"></div></div>
 
-    <div class="panel"><h2>Simulation vs. Messung (deterministisch): Speichertemperaturen</h2>
+    <div class="panel"><h2>Speichertemperaturen: Messung (links von 0) und Simulation ab jetzt</h2>
       <div id="chartTemps" class="chart"></div></div>
 
     <div class="panel"><h2>Einflussfaktoren: Wetter &amp; Sollwerte</h2>
@@ -145,6 +146,10 @@
         kpi(d.calibration.discharge.ua_w_per_k + ' W/K', 'Gebäude-UA') +
         kpi(d.calibration.buffer_threshold.start_offset_k + ' K', 'Start-Offset Puffer');
 
+      const ss = f.start_state;
+      document.getElementById('fcNote').innerHTML = f.mode==='live'
+        ? `Prognose ab <b>jetzt</b>: Startzustand gemessen (${new Date(ss.last_measurement).toLocaleTimeString()}): Puffer ${ss.buffer_c} °C, DHW ${ss.dhw_c} °C. Zukünftige Eingänge (Außentemp., Strahlung, Sollwerte, SG) = <b>letzte 24 h wiederholt</b>.`
+        : '<span class="bad">Replay-Modus (Debug): gemessenes Wetter, kein Live-Start</span>';
       // Forecast band
       Plotly.newPlot('chartForecast', [
         {x:f.slot_hours, y:f.p_el_p90_w, name:'P90', line:{width:0}, showlegend:false, hoverinfo:'skip'},
@@ -156,10 +161,14 @@
         {x:f.slot_hours, y:f.run_probability, type:'bar', marker:{color:'#4a9eff'}, name:'Laufw.'}
       ], {...L, yaxis:{...L.yaxis,title:'p',range:[0,1]}, xaxis:{...L.xaxis,title:'Stunden'}}, cfg);
 
+      const hst = d.history || {};
       Plotly.newPlot('chartTemps', [
-        {x:s.hours, y:s.buffer_meas_c, name:'Puffer gemessen', line:{color:'#4a9eff'}},
+        ...(hst.hours ? [
+          {x:hst.hours, y:hst.buffer_meas_c, name:'Puffer gemessen (letzte 24 h)', line:{color:'#4a9eff'}},
+          {x:hst.hours, y:hst.dhw_meas_c, name:'DHW gemessen (letzte 24 h)', line:{color:'#5fd27a'}}] : [
+          {x:s.hours, y:s.buffer_meas_c, name:'Puffer gemessen', line:{color:'#4a9eff'}},
+          {x:s.hours, y:s.dhw_meas_c, name:'DHW gemessen', line:{color:'#5fd27a'}}]),
         {x:s.hours, y:s.buffer_sim_c, name:'Puffer simuliert', line:{color:'#f08c3a',dash:'dash'}},
-        {x:s.hours, y:s.dhw_meas_c, name:'DHW gemessen', line:{color:'#5fd27a'}},
         {x:s.hours, y:s.dhw_sim_c, name:'DHW simuliert', line:{color:'#e05fd2',dash:'dash'}},
       ], {...L, yaxis:{...L.yaxis,title:'°C'}, xaxis:{...L.xaxis,title:'Stunden'}}, cfg);
 
@@ -270,20 +279,27 @@
       let res = s.ok ? `<span class="ok">OK</span> · HTTP ${s.http_status||'–'} · ${s.planned_kwh||'–'} kWh geplant` : (s.error ? `<span class="bad">Fehler: ${s.error}</span>` : '–');
       const miss = (s.missing_config||[]).length
         ? `<div class="bad" style="margin-bottom:6px">⚠ Konfiguration unvollständig (fehlt: ${s.missing_config.join(', ')}) – unten „⬆ Config importieren".</div>` : '';
-      return miss + `Automatik: <b>${s.auto_push_enabled?'AN':'aus'}</b> (alle ${s.schedule_interval_minutes} min) · EOS ${s.eos_configured?'konfiguriert':'<span class="bad">fehlt</span>'} · Datenalter: <b>${ageTxt}</b> ${sync}<br>Letzter Lauf: ${last} · ${res}`;
+      const run = s.running ? `<div style="margin-bottom:6px">⏳ <b>läuft:</b> ${s.phase||'…'}</div>` : '';
+      return miss + run + `Automatik: <b>${s.auto_push_enabled?'AN':'aus'}</b> (alle ${s.schedule_interval_minutes} min) · EOS ${s.eos_configured?'konfiguriert':'<span class="bad">fehlt</span>'} · Datenalter: <b>${ageTxt}</b> ${sync}<br>Letzter Lauf: ${last} · ${res}`;
     }
     async function refreshStatus() {
       try { document.getElementById('status').innerHTML = fmtStatus(await (await fetch('api/status')).json()); } catch(e) {}
     }
     async function pushNow(push) {
-      const b = document.getElementById(push?'pushnow':'dryrun'); const t=b.textContent; b.disabled=true; b.textContent='läuft…';
+      const b = document.getElementById(push?'pushnow':'dryrun'); const label=b.textContent; b.disabled=true; b.textContent='läuft…';
       document.getElementById('err').textContent='';
       try {
-        const r = await (await fetch('api/push_now', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({push})})).json();
-        if (!r.ok && r.error) document.getElementById('err').textContent = 'Zyklus-Fehler: ' + r.error;
+        await fetch('api/push_now', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({push})});
+        // Zyklus läuft im Hintergrund (Backfill kann Minuten dauern) -> Status abfragen
+        for (let i=0; i<900; i++) {
+          await new Promise(r=>setTimeout(r, 2000));
+          const s = await (await fetch('api/status')).json();
+          document.getElementById('status').innerHTML = fmtStatus(s);
+          if (!s.running) { if (!s.ok && s.error) document.getElementById('err').textContent = 'Zyklus-Fehler: ' + s.error; break; }
+        }
         await refreshStatus(); await load();
       } catch(e) { document.getElementById('err').textContent = 'Fehler: ' + e.message; }
-      b.disabled=false; b.textContent=t;
+      b.disabled=false; b.textContent=label;
     }
     // --- Config-Bundle Export/Import ---
     async function downloadConfig() {

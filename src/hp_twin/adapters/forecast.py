@@ -13,8 +13,13 @@ import numpy as np
 import pandas as pd
 
 from hp_twin.adapters.eos_connect import EosLoadProfile, load_profile_from_slots
-from hp_twin.adapters.replay import build_replay
+from hp_twin.adapters.replay import (
+    build_forecast_frame,
+    build_replay,
+    initial_controller_state,
+)
 from hp_twin.domain.calibration import CalibrationReport
+from hp_twin.domain.controller import ControllerState
 from hp_twin.domain.model_config import ModelConfig
 from hp_twin.domain.montecarlo import (
     ForecastEvent,
@@ -64,6 +69,7 @@ def run_forecast(
     start_idx: int,
     horizon_h: float | None = None,
     model: ModelConfig | None = None,
+    ctrl_state: ControllerState | None = None,
 ) -> ForecastResult:
     model = model or ModelConfig()
     horizon_h = horizon_h if horizon_h is not None else model.sim.horizon_h
@@ -71,7 +77,14 @@ def run_forecast(
     mc = model.montecarlo
 
     det = build_replay(
-        df, topology, calib, start_idx, horizon_h, dhw_setpoint_cap_c=cap, model=model
+        df,
+        topology,
+        calib,
+        start_idx,
+        horizon_h,
+        dhw_setpoint_cap_c=cap,
+        model=model,
+        ctrl_state=ctrl_state,
     )
     time_s = det.result.time_s
     events = extract_events(time_s, det.result.mode, det.result.p_el_w)
@@ -92,6 +105,7 @@ def run_forecast(
                 model.load.c_building_j_per_k * np.exp(rng.normal(0.0, mc.c_building_sigma))
             ),
             model=model,
+            ctrl_state=ctrl_state,
         )
         p_el_runs.append(rep.result.p_el_w)
 
@@ -109,3 +123,22 @@ def run_forecast(
     return ForecastResult(
         events=events, slots=slots, eos=eos, deterministic_p_el_w=det.result.p_el_w, time_s=time_s
     )
+
+
+def run_live_forecast(
+    df: pd.DataFrame,
+    topology: Topology,
+    calib: CalibrationReport,
+    horizon_h: float | None = None,
+    model: ModelConfig | None = None,
+) -> ForecastResult:
+    """ECHTE Vorwärtsprognose ab dem letzten Messpunkt ("jetzt").
+
+    Startzustand: letzte gemessene Speichertemperaturen + Reglerzustand (läuft/Pause seit ...).
+    Zukünftige Eingänge: letzte 24 h täglich wiederholt (siehe build_forecast_frame).
+    """
+    model = model or ModelConfig()
+    horizon_h = horizon_h if horizon_h is not None else model.sim.horizon_h
+    frame = build_forecast_frame(df, horizon_h)
+    cs = initial_controller_state(df, topology.controller.min_off_s)
+    return run_forecast(frame, topology, calib, 0, horizon_h=horizon_h, model=model, ctrl_state=cs)
