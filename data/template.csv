@@ -1,0 +1,4 @@
+timestamp,t_outdoor_c,ghi_wm2,compressor_on,mode,p_el_w,q_heat_wh,t_flow_c,t_return_c,t_dhw_c,t_hk1_c,t_hk2_c,setpoint_dhw_c,setpoint_hk1_c,setpoint_hk2_c,t_outdoor_fc_c,circuit_active,t_room_wohnen_c
+2026-01-10T00:00:00Z,-0.8,0.0,1,heat,3514.0,1024.9,38.0,33.0,43.46,27.0,26.24,40.5,31.5,27.5,-1.05,hk1,21.0
+2026-01-10T00:05:00Z,-0.92,0.0,1,heat,3507.0,1023.0,38.0,33.0,43.39,28.81,26.25,40.5,31.5,27.5,-0.57,hk1,21.01
+2026-01-10T00:10:00Z,-0.82,0.0,1,heat,3595.0,1048.4,38.0,33.0,43.63,30.61,26.84,40.5,31.5,27.5,-3.31,hk1,21.02

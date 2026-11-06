@@ -1,0 +1,41 @@
+# Zentrale, konfigurierbare Modellparameter (überschreiben die Code-Defaults).
+# Alle Felder sind optional; fehlt die Datei, gelten die Defaults aus ModelConfig.
+sim:
+  timestep_s: 60
+  horizon_h: 48
+  condenser_approach_k: 7.0      # Vorlauf = Knotentemperatur + x (gedeckelt am Soll)
+load:
+  c_building_j_per_k: 1.5e7      # wirksame Gebäudemasse
+  emission_ua_w_per_k: 1000.0    # Fußboden-Emission (Multi-Zone)
+  fallback_emission_ua_w_per_k: 600.0
+  throttle_band_k: 2.0
+  frost_threshold_c: 6.0         # Raum-Soll > Wert => Raum aktiv beheizt
+  internal_gain_w: 0.0
+  ua_air_mass_w_per_k: 300.0
+  ua_air_out_fraction: 0.5
+controller:
+  dhw_hysteresis_k: 5.0
+  dhw_overshoot_k: 2.0
+  buffer_hysteresis_k: null      # null = aus Kalibrierung
+  buffer_overshoot_k: null
+calibration:
+  standby_fallback_w: 80.0
+  t_flow_ref_c: 35.0
+  t_out_ref_c: 5.0
+  discharge_window_s: 900.0
+  op_min_flow_lpm: 2.0
+  op_min_p_el_w: 500.0
+montecarlo:
+  n_runs: 100
+  seed: 0
+  demand_sigma: 0.15
+  solar_sigma: 0.3
+  c_building_sigma: 0.3
+forecast:
+  slot_s: 900.0                  # 15 min
+  running_threshold_w: 200.0
+  dhw_setpoint_cap_c: 45.0       # neue Konfig: DHW passiv (null = Messwert nutzen)
+  eos_ttl_minutes: null
+backtest:
+  horizon_h: 24
+  step_min: 180

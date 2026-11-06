@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hp-twin Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.27.0/plotly.min.js"></script>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a2029; --fg:#e6edf3; --muted:#9aa7b4; --acc:#f08c3a; --blue:#4a9eff; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui,sans-serif; }
+    header { background:var(--panel); padding:12px 20px; display:flex; gap:16px; align-items:center; flex-wrap:wrap; border-bottom:1px solid #2a3340; }
+    header h1 { font-size:18px; margin:0; margin-right:auto; }
+    header label { color:var(--muted); font-size:13px; }
+    header input, header select { background:#0f1419; color:var(--fg); border:1px solid #2a3340; border-radius:6px; padding:4px 8px; width:70px; }
+    button { background:var(--acc); color:#111; border:0; border-radius:6px; padding:6px 14px; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:wait; }
+    main { padding:16px; max-width:1200px; margin:0 auto; }
+    .kpis { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:12px; }
+    .kpi { background:var(--panel); border-radius:10px; padding:10px 16px; min-width:120px; }
+    .kpi .v { font-size:22px; font-weight:700; }
+    .kpi .l { color:var(--muted); font-size:12px; }
+    .panel { background:var(--panel); border-radius:10px; padding:12px 16px; margin-bottom:16px; }
+    .panel h2 { font-size:15px; margin:0 0 8px; color:var(--acc); }
+    .chart { width:100%; height:340px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { text-align:left; padding:4px 8px; border-bottom:1px solid #2a3340; }
+    th { color:var(--muted); font-weight:600; }
+    details summary { cursor:pointer; color:var(--muted); }
+    pre { background:#0f1419; padding:10px; border-radius:6px; overflow:auto; font-size:12px; max-height:260px; }
+    .notes li { color:var(--muted); }
+    #err { color:#ff6b6b; }
+    .form { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:8px 14px; }
+    .form label { display:flex; flex-direction:column; gap:3px; color:var(--muted); font-size:12px; }
+    .form input { width:100%; }
+    .form .chk { flex-direction:row; align-items:center; gap:6px; }
+    .ok { color:#5fd27a; } .bad { color:#ff6b6b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🔥 hp-twin · Lastprognose-Dashboard</h1>
+    <label>Horizont (h) <input id="horizon" type="number" value="48" /></label>
+    <label>MC-Läufe <input id="runs" type="number" value="50" /></label>
+    <label>Start <select id="fromend"><option value="true">Ende der Daten</option><option value="false">Anfang</option></select></label>
+    <button id="refresh">Aktualisieren</button>
+  </header>
+  <main>
+    <div id="err"></div>
+
+    <div class="panel"><h2>⚙️ Automatik &amp; EOS-Connect-Verbindung</h2>
+      <div id="status" style="margin-bottom:10px;color:var(--muted)"></div>
+      <div class="form">
+        <label>HA Basis-URL<input id="ha_base_url" placeholder="http://homeassistant.local:8123" /></label>
+        <label>HA Token<input id="ha_token" type="password" placeholder="(leer = unverändert)" /></label>
+        <label>EOS Basis-URL<input id="eos_base_url" placeholder="http://homeassistant.local:8081" /></label>
+        <label>Managed-Load-ID<input id="eos_managed_load_id" placeholder="hp_ext" /></label>
+        <label>EOS-Token (optional)<input id="eos_token" type="password" placeholder="(leer = unverändert)" /></label>
+        <label>TTL (min)<input id="eos_ttl_minutes" type="number" placeholder="leer" /></label>
+        <label>MC-Läufe<input id="forecast_runs" type="number" value="100" /></label>
+        <label>Horizont (h)<input id="horizon_h" type="number" value="48" /></label>
+        <label>DHW-Cap °C<input id="dhw_setpoint_cap_c" type="number" value="45" /></label>
+        <label>Export-Fenster (h)<input id="export_window_hours" type="number" value="6" /></label>
+        <label>Intervall (min)<input id="schedule_interval_minutes" type="number" value="15" /></label>
+        <label class="chk"><input id="auto_push_enabled" type="checkbox" /> Automatik aktiv</label>
+        <label class="chk"><input id="export_before_push" type="checkbox" checked /> vor Push exportieren</label>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+        <button id="save">Einstellungen speichern</button>
+        <button id="pushnow" style="background:var(--blue)">▶ Push jetzt</button>
+        <button id="dryrun" style="background:#394150;color:#e6edf3">Dry-Run (ohne Push)</button>
+      </div>
+    </div>
+
+    <div class="panel"><h2>🔧 Modell-Parameter (config/model.yaml)</h2>
+      <div id="modelForm"></div>
+      <div style="margin-top:10px"><button id="saveModel">Modell-Parameter speichern</button>
+        <span id="modelMsg" style="margin-left:10px;color:var(--muted)"></span></div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="panel"><h2>Lastprognose (Monte-Carlo): P_el Erwartungswert + P10–P90</h2>
+      <div id="chartForecast" class="chart"></div></div>
+
+    <div class="panel"><h2>Laufwahrscheinlichkeit je 15-min-Slot</h2>
+      <div id="chartProb" class="chart" style="height:200px"></div></div>
+
+    <div class="panel"><h2>Simulation vs. Messung (deterministisch): Speichertemperaturen</h2>
+      <div id="chartTemps" class="chart"></div></div>
+
+    <div class="panel"><h2>Einflussfaktoren: Wetter &amp; Sollwerte</h2>
+      <div id="chartFactors" class="chart"></div></div>
+
+    <div class="panel"><h2>Aktiv beheizte Räume (aus climate hvac/Sollwert)</h2>
+      <div id="chartRooms" class="chart" style="height:280px"></div></div>
+
+    <div class="panel"><h2>Kalibrierung – wie die Berechnung zustande kommt</h2>
+      <div id="calib"></div>
+      <ul class="notes" id="notes"></ul></div>
+
+    <div class="panel"><h2>Vorhergesagte Ereignisse</h2>
+      <table><thead><tr><th>Start (h)</th><th>Ende (h)</th><th>Modus</th><th>Ø P_el (W)</th></tr></thead>
+      <tbody id="events"></tbody></table></div>
+
+    <div class="panel"><h2>EOS-Connect-Payload &amp; Modell-Konfiguration</h2>
+      <details><summary>EOS-Payload (192 × 15 min)</summary><pre id="eos"></pre></details>
+      <details><summary>Modell-Konfiguration</summary><pre id="config"></pre></details>
+    </div>
+  </main>
+
+  <script>
+    const L = { paper_bgcolor:'#1a2029', plot_bgcolor:'#1a2029', font:{color:'#e6edf3'},
+      margin:{l:50,r:20,t:10,b:40}, legend:{orientation:'h',y:1.15}, xaxis:{gridcolor:'#2a3340'}, yaxis:{gridcolor:'#2a3340'} };
+    const cfg = {displayModeBar:false, responsive:true};
+
+    async function load() {
+      const btn = document.getElementById('refresh'); btn.disabled = true;
+      document.getElementById('err').textContent = '';
+      const h = document.getElementById('horizon').value, r = document.getElementById('runs').value, fe = document.getElementById('fromend').value;
+      try {
+        const res = await fetch(`api/analysis?horizon_h=${h}&runs=${r}&from_end=${fe}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status + ' – ' + (await res.text()));
+        render(await res.json());
+      } catch (e) { document.getElementById('err').textContent = 'Fehler: ' + e.message; }
+      btn.disabled = false;
+    }
+
+    function kpi(v, l) { return `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`; }
+
+    function render(d) {
+      const f = d.forecast, s = d.sim, fac = d.factors, cal = d.calibration.heat_pump;
+      document.getElementById('kpis').innerHTML =
+        kpi(f.events.length, 'Ereignisse (48h)') +
+        kpi(f.expected_energy_kwh + ' kWh', 'erwartete Energie') +
+        kpi(cal.p_el_r2, 'WP-Kennfeld R² (P_el)') +
+        kpi(d.calibration.discharge.ua_w_per_k + ' W/K', 'Gebäude-UA') +
+        kpi(d.calibration.buffer_threshold.start_offset_k + ' K', 'Start-Offset Puffer');
+
+      // Forecast band
+      Plotly.newPlot('chartForecast', [
+        {x:f.slot_hours, y:f.p_el_p90_w, name:'P90', line:{width:0}, showlegend:false, hoverinfo:'skip'},
+        {x:f.slot_hours, y:f.p_el_p10_w, name:'P10–P90', fill:'tonexty', fillcolor:'rgba(240,140,58,0.25)', line:{width:0}},
+        {x:f.slot_hours, y:f.p_el_mean_w, name:'Erwartungswert', line:{color:'#f08c3a',width:2}},
+      ], {...L, yaxis:{...L.yaxis,title:'P_el [W]'}, xaxis:{...L.xaxis,title:'Stunden ab Start'}}, cfg);
+
+      Plotly.newPlot('chartProb', [
+        {x:f.slot_hours, y:f.run_probability, type:'bar', marker:{color:'#4a9eff'}, name:'Laufw.'}
+      ], {...L, yaxis:{...L.yaxis,title:'p',range:[0,1]}, xaxis:{...L.xaxis,title:'Stunden'}}, cfg);
+
+      Plotly.newPlot('chartTemps', [
+        {x:s.hours, y:s.buffer_meas_c, name:'Puffer gemessen', line:{color:'#4a9eff'}},
+        {x:s.hours, y:s.buffer_sim_c, name:'Puffer simuliert', line:{color:'#f08c3a',dash:'dash'}},
+        {x:s.hours, y:s.dhw_meas_c, name:'DHW gemessen', line:{color:'#5fd27a'}},
+        {x:s.hours, y:s.dhw_sim_c, name:'DHW simuliert', line:{color:'#e05fd2',dash:'dash'}},
+      ], {...L, yaxis:{...L.yaxis,title:'°C'}, xaxis:{...L.xaxis,title:'Stunden'}}, cfg);
+
+      const traces = [
+        {x:fac.hours, y:fac.t_outdoor_c, name:'Außentemp °C', line:{color:'#4a9eff'}},
+        {x:fac.hours, y:fac.setpoint_hk1_c, name:'HK1-Soll °C', line:{color:'#f08c3a'}},
+        {x:fac.hours, y:fac.ghi_wm2, name:'GHI W/m²', yaxis:'y2', line:{color:'#5fd27a'}},
+      ];
+      if (fac.sg_status) traces.push({x:fac.hours, y:fac.sg_status, name:'SG-Status', yaxis:'y2', line:{color:'#e05fd2',dash:'dot'}});
+      Plotly.newPlot('chartFactors', traces,
+        {...L, yaxis:{...L.yaxis,title:'°C'}, yaxis2:{overlaying:'y',side:'right',title:'W/m² / SG',gridcolor:'#2a3340'}, xaxis:{...L.xaxis,title:'Stunden'}}, cfg);
+
+      // Active rooms heatmap
+      const rn = Object.keys(fac.active_rooms);
+      if (rn.length) {
+        Plotly.newPlot('chartRooms', [{
+          z: rn.map(k=>fac.active_rooms[k]), x: fac.hours, y: rn, type:'heatmap',
+          colorscale:[[0,'#1a2029'],[1,'#f08c3a']], showscale:false
+        }], {...L, xaxis:{...L.xaxis,title:'Stunden'}, margin:{l:140,r:20,t:10,b:40}}, cfg);
+      }
+
+      const c = d.calibration;
+      document.getElementById('calib').innerHTML = `<table>
+        <tr><th>WP-Kennfeld</th><td>P_comp = ${cal.p_el_ref_w} W + ${cal.dp_dt_flow_w_per_k}·(T_vl−${c.heat_pump ? 35 : 35}) + ${cal.dp_dt_out_w_per_k}·(T_aus−5) · η=${cal.eta_carnot} · R²(P_el)=${cal.p_el_r2} · COP≈${cal.cop_median_measured}</td></tr>
+        <tr><th>Regler-Schwellen</th><td>Start ${c.buffer_threshold.start_offset_k} K, Stopp +${c.buffer_threshold.stop_offset_k} K (${c.buffer_threshold.n_starts} Takte)</td></tr>
+        <tr><th>Gebäude</th><td>UA ${c.discharge.ua_w_per_k} W/K, Solar ${c.discharge.solar_w_per_wm2} W/(W/m²), r²=${c.discharge.r2}</td></tr></table>`;
+      document.getElementById('notes').innerHTML = (c.notes||[]).map(n=>`<li>${n}</li>`).join('');
+
+      document.getElementById('events').innerHTML = f.events.map(e=>
+        `<tr><td>${(e.start_min/60).toFixed(1)}</td><td>${(e.end_min/60).toFixed(1)}</td><td>${e.mode}</td><td>${e.mean_p_el_w}</td></tr>`).join('');
+      document.getElementById('eos').textContent = JSON.stringify(f.eos_payload, null, 1);
+      document.getElementById('config').textContent = JSON.stringify(d.config, null, 2);
+    }
+
+    // --- Settings & Automatik ---
+    const S_FIELDS = ['ha_base_url','eos_base_url','eos_managed_load_id','eos_ttl_minutes','forecast_runs','horizon_h','dhw_setpoint_cap_c','export_window_hours','schedule_interval_minutes'];
+    async function loadSettings() {
+      try {
+        const s = await (await fetch('api/settings')).json();
+        S_FIELDS.forEach(k => { if (s[k] !== null && s[k] !== undefined) document.getElementById(k).value = s[k]; });
+        document.getElementById('auto_push_enabled').checked = !!s.auto_push_enabled;
+        document.getElementById('export_before_push').checked = !!s.export_before_push;
+        document.getElementById('eos_token').placeholder = s.eos_token_set ? '•••••• (gesetzt)' : '(leer)';
+        document.getElementById('ha_token').placeholder = s.ha_token_set ? '•••••• (gesetzt)' : '(leer)';
+      } catch(e) {}
+    }
+    function collectSettings() {
+      const p = {};
+      S_FIELDS.forEach(k => { const v = document.getElementById(k).value; if (v !== '') p[k] = isNaN(v) ? v : parseFloat(v); });
+      p.ha_base_url = document.getElementById('ha_base_url').value;
+      p.eos_base_url = document.getElementById('eos_base_url').value;
+      p.eos_managed_load_id = document.getElementById('eos_managed_load_id').value;
+      p.forecast_runs = parseInt(document.getElementById('forecast_runs').value || '100');
+      p.auto_push_enabled = document.getElementById('auto_push_enabled').checked;
+      p.export_before_push = document.getElementById('export_before_push').checked;
+      const tok = document.getElementById('eos_token').value; if (tok) p.eos_token = tok;
+      const htok = document.getElementById('ha_token').value; if (htok) p.ha_token = htok;
+      return p;
+    }
+
+    // --- Modell-Parameter (config/model.yaml) ---
+    let MODEL = {};
+    async function loadModel() {
+      try {
+        MODEL = await (await fetch('api/model')).json();
+        const el = document.getElementById('modelForm');
+        el.innerHTML = Object.entries(MODEL).map(([sec,vals]) =>
+          `<details open><summary style="color:var(--acc);font-weight:600">${sec}</summary>
+           <div class="form" style="margin:6px 0 10px">` +
+           Object.entries(vals).map(([k,v]) => {
+             const id = `m_${sec}_${k}`;
+             if (typeof v === 'boolean')
+               return `<label class="chk"><input type="checkbox" id="${id}" ${v?'checked':''}/> ${k}</label>`;
+             const val = v===null ? '' : v;
+             return `<label>${k}<input id="${id}" value="${val}" data-type="${v===null?'num':typeof v}"/></label>`;
+           }).join('') + `</div></details>`).join('');
+      } catch(e) { document.getElementById('modelForm').textContent = 'Fehler: ' + e.message; }
+    }
+    async function saveModel() {
+      const patch = {};
+      for (const [sec,vals] of Object.entries(MODEL)) {
+        patch[sec] = {};
+        for (const [k,v] of Object.entries(vals)) {
+          const inp = document.getElementById(`m_${sec}_${k}`);
+          if (!inp) continue;
+          if (typeof v === 'boolean') patch[sec][k] = inp.checked;
+          else if (inp.value === '') patch[sec][k] = null;
+          else patch[sec][k] = isNaN(inp.value) ? inp.value : parseFloat(inp.value);
+        }
+      }
+      const msg = document.getElementById('modelMsg'); msg.textContent = 'speichere…';
+      try {
+        const r = await fetch('api/model', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(patch)});
+        if (!r.ok) throw new Error(await r.text());
+        MODEL = await r.json(); msg.textContent = '✓ gespeichert'; setTimeout(()=>msg.textContent='',3000);
+      } catch(e) { msg.textContent = 'Fehler: ' + e.message; }
+    }
+    async function saveSettings() {
+      await fetch('api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collectSettings())});
+      document.getElementById('eos_token').value = '';
+      await loadSettings(); await refreshStatus();
+    }
+    function fmtStatus(s) {
+      const age = s.data_age_minutes_live;
+      const ageTxt = age==null ? 'keine Daten' : (age<60 ? age.toFixed(0)+' min' : (age/60).toFixed(1)+' h');
+      const sync = age==null ? '' : (age < 30 ? '<span class="ok">● synchron</span>' : '<span class="bad">● Daten veraltet</span>');
+      let last = s.last_run_iso ? new Date(s.last_run_iso).toLocaleString() : '–';
+      let res = s.ok ? `<span class="ok">OK</span> · HTTP ${s.http_status||'–'} · ${s.planned_kwh||'–'} kWh geplant` : (s.error ? `<span class="bad">Fehler: ${s.error}</span>` : '–');
+      return `Automatik: <b>${s.auto_push_enabled?'AN':'aus'}</b> (alle ${s.schedule_interval_minutes} min) · EOS ${s.eos_configured?'konfiguriert':'<span class="bad">fehlt</span>'} · Datenalter: <b>${ageTxt}</b> ${sync}<br>Letzter Lauf: ${last} · ${res}`;
+    }
+    async function refreshStatus() {
+      try { document.getElementById('status').innerHTML = fmtStatus(await (await fetch('api/status')).json()); } catch(e) {}
+    }
+    async function pushNow(push) {
+      const b = document.getElementById(push?'pushnow':'dryrun'); const t=b.textContent; b.disabled=true; b.textContent='läuft…';
+      document.getElementById('err').textContent='';
+      try {
+        const r = await (await fetch('api/push_now', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({push})})).json();
+        if (!r.ok && r.error) document.getElementById('err').textContent = 'Zyklus-Fehler: ' + r.error;
+        await refreshStatus(); await load();
+      } catch(e) { document.getElementById('err').textContent = 'Fehler: ' + e.message; }
+      b.disabled=false; b.textContent=t;
+    }
+    document.getElementById('save').addEventListener('click', saveSettings);
+    document.getElementById('saveModel').addEventListener('click', saveModel);
+    document.getElementById('pushnow').addEventListener('click', ()=>pushNow(true));
+    document.getElementById('dryrun').addEventListener('click', ()=>pushNow(false));
+
+    document.getElementById('refresh').addEventListener('click', load);
+    loadSettings(); loadModel(); refreshStatus(); setInterval(refreshStatus, 20000);
+    load();
+  </script>
+</body>
+</html>

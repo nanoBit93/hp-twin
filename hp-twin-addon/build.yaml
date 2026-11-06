@@ -1,0 +1,8 @@
+build_from:
+  aarch64: ghcr.io/home-assistant/aarch64-base-python:3.12
+  amd64: ghcr.io/home-assistant/amd64-base-python:3.12
+  armv7: ghcr.io/home-assistant/armv7-base-python:3.12
+# Eigenen Fork hier eintragen, dann baut das Add-on direkt daraus:
+args:
+  REPO_URL: "git+https://github.com/nanoBit93/hp-twin@main"
+codenotary: false

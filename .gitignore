@@ -1,0 +1,30 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+build/
+dist/
+
+# --- Secrets (niemals committen) ---
+.env
+.env.*
+!.env.example
+
+# --- Persönliche / installationsspezifische Daten (NICHT ins GitHub-Repo) ---
+# Rohdaten-Exporte, Plots, Kalibrier-/Prognoseergebnisse (enthalten Mess-/Verbrauchsdaten)
+data/ha_export/
+# Alle PDFs (Planungsmappe enthält Name/Adresse)
+*.pdf
+# Reale, installationsspezifische Konfiguration (Entity-IDs, Raum-Heizlasten).
+# Vorlagen liegen als *.example.yaml / *_template.yaml im Repo.
+config/ha_mapping.yaml
+config/heizlast.yaml
+config/topology.yaml
+config/runtime.json
+
+# Ausnahmen: Vorlagen und generisches Beispiel bleiben versioniert
+!config/*.example.yaml
+!config/example_topology.yaml

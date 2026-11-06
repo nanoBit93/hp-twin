@@ -1,0 +1,48 @@
+# Beispielanlage: WPL-A 25 + 600-l-Kombispeicher (2 Knoten). Werte mit "# TODO" bitte prüfen.
+name: wpl-a-25-kombispeicher
+simulation: {timestep_s: 60, horizon_h: 48}
+
+storage:
+  id: kombi
+  t_ambient_c: 15.0
+  nodes:
+    - {id: dhw,    volume_l: 300, sensor_position: 0.5, loss_ua_w_per_k: 1.2, t_init_c: 43.0}  # Fühler bei 1/4 Gesamthöhe
+    - {id: buffer, volume_l: 300, sensor_position: 0.5, loss_ua_w_per_k: 1.2, t_init_c: 32.0}  # Fühler bei 3/4 Gesamthöhe
+  couplings:
+    # Asymmetrisch (Hygienespeicher): stark aufwärts (Puffer heizt DHW passiv), schwach abwärts
+    # (Schichtung hält die DHW-Zone oben warm, kalter Puffer zieht sie nicht leer).
+    - {upper: dhw, lower: buffer, k_w_per_k: 120.0, k_down_w_per_k: 4.0, buoyancy_mixing: true}
+
+sources:
+  - {type: heat_pump_air_water, id: wp, model: WPL-A 25, single_compressor: true}
+  - {type: electric_heater, id: heizstab, power_w: 6000, enabled: false, emergency_only: true}
+
+consumers:
+  - kind: dhw
+    id: dhw
+    node: dhw
+    setpoint_c: 40.5
+    hysteresis_k: 5.0        # TODO: DHW-Hysterese im WPM prüfen
+    priority: true
+  - kind: heating_circuit
+    id: hk1
+    node: buffer
+    sensor_node: buffer
+    leads_charging: true
+    mixed: false
+    hysteresis_k: 5.0
+    curve: {slope: 0.3, base_c: 21.0}   # TODO: Fußpunkt prüfen
+  - kind: heating_circuit
+    id: hk2
+    node: buffer
+    mixed: true
+    hysteresis_k: 5.0        # TODO
+    curve: {slope: 0.3, base_c: 21.0}
+
+controller:
+  min_off_s: 1800            # 30 min Mindeststillstand/Pause nach Ladungsende
+  min_on_s: 300
+  dhw_mode: parallel
+
+return_injections:
+  - {charging_circuit: dhw, node: buffer, fraction: 0.0}   # >0 bildet HK1-Einbruch bei WW-Ladung ab

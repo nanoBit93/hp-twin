@@ -1,0 +1,22 @@
+# Strukturierte Heizlast (aus Norm-Heizlastberechnung, DIN EN 12831). Werte aus PDF eintragen.
+# UA_Raum = design_heat_load_w / (design_room_temp_c - design_outdoor_c).
+# climate_entity verknüpft den Raum mit hvac_action (aktiv/idle/aus) in den Messdaten.
+design_outdoor_c: -10.0      # Norm-Außentemperatur (aus PDF / Klimaregion)
+rooms:
+  - name: wohnzimmer
+    design_heat_load_w: 0     # TODO aus PDF
+    design_room_temp_c: 20
+    area_m2: 0                # TODO
+    circuit: hk1
+    climate_entity: climate.thermostat_wohnzimmer
+  - name: arbeitszimmer
+    design_heat_load_w: 0
+    design_room_temp_c: 20
+    circuit: hk1
+    climate_entity: climate.heizung_arbeitszimmer
+  - name: schlafzimmer
+    design_heat_load_w: 0
+    design_room_temp_c: 20
+    circuit: hk1
+    climate_entity: climate.thermostat_schlafzimmer
+  # ... weitere Räume aus der Heizlast-PDF

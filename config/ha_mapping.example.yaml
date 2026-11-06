@@ -1,0 +1,44 @@
+# VORLAGE – nach config/ha_mapping.yaml kopieren und an die eigene Anlage anpassen.
+# config/ha_mapping.yaml ist gitignored (enthält installationsspezifische Entity-IDs).
+# Die Stiebel-ISG-Entity-Namen (sensor.warmepumpe_*) sind bei der ISG-HA-Integration üblich.
+
+base_url_env: HA_BASE_URL
+token_env: HA_TOKEN
+resample: 1min
+timezone: UTC
+
+sensors:
+  t_outdoor_c:        sensor.warmepumpe_aussentemperatur
+  ghi_wm2:            sensor.<DEIN_GLOBALSTRAHLUNGS_SENSOR>   # z. B. aus Wetterintegration (W/m²)
+  p_el_w:             sensor.<DEINE_WP_LEISTUNG>              # Gesamtleistung inkl. Standby
+  t_flow_c:           sensor.warmepumpe_vorlauftemperatur_wp1
+  t_return_c:         sensor.warmepumpe_rucklauftemperatur_wp1
+  t_dhw_c:            sensor.warmepumpe_ist_temperatur_warmwasser
+  t_hk1_c:            sensor.warmepumpe_ist_temperatur_puffer
+  t_hk2_c:            sensor.warmepumpe_ist_temperatur_hk_2
+  setpoint_dhw_c:     sensor.warmepumpe_soll_temperatur_warmwasser
+  setpoint_hk1_c:     sensor.warmepumpe_soll_temperatur_puffer
+  setpoint_hk2_c:     sensor.warmepumpe_soll_temperatur_hk_2
+  flow_rate_lpm:      sensor.warmepumpe_volumenstrom_wp1
+
+scales:
+  p_el_w: 1000.0   # nur falls der Leistungssensor in kW liefert (sonst 1.0 oder weglassen)
+
+rooms:   # t_room_<name>_c -- Raumtemperatur-Sensoren
+  raum1:  sensor.<RAUM1_TEMPERATUR>
+  raum2:  sensor.<RAUM2_TEMPERATUR>
+
+sg_status:  sensor.warmepumpe_sg_ready_status   # optional (SG-Ready)
+climate:   # optional: Raum-Thermostate (Attribut-Historie: Sollwert + hvac_action)
+  raum1:  climate.<RAUM1_THERMOSTAT>
+  raum2:  climate.<RAUM2_THERMOSTAT>
+
+derived:
+  compressor_on:  binary_sensor.warmepumpe_verdichter
+  mode:
+    defrost: binary_sensor.warmepumpe_verdampferabtauung
+    dhw:     binary_sensor.warmepumpe_warmwasserbetrieb
+    heat:    binary_sensor.warmepumpe_heizbetrieb
+  circuit_active:
+    dhw:  binary_sensor.warmepumpe_warmwasser_ladepumpe
+    hk1:  binary_sensor.warmepumpe_puffer_1_ladepumpe

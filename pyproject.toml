@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hp-twin"
+version = "0.1.0"
+description = "Digital twin of a heat pump installation for 48h load forecasts (EOS Connect)"
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.6",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "scipy>=1.12",
+  "pyyaml>=6.0",
+  "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+dev = ["pytest>=8", "ruff>=0.4", "mypy>=1.10", "pandas-stubs", "types-PyYAML", "httpx", "fastapi>=0.110", "uvicorn>=0.29"]
+
+[project.scripts]
+hp-twin = "hp_twin.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hp_twin"]
+artifacts = ["*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+explicit_package_bases = true
+namespace_packages = true
+
+[[tool.mypy.overrides]]
+module = "hp_twin.domain.*"
+strict = true
