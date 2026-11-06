@@ -37,3 +37,14 @@ def test_settings_endpoints(tmp_path: Path, monkeypatch) -> None:
     assert r.status_code == 200 and r.json()["eos_base_url"] == "http://y:8081"
     st = c.get("/api/status").json()
     assert "data_age_minutes_live" in st and "eos_configured" in st
+
+
+def test_missing_config_detected(tmp_path: Path) -> None:
+    from hp_twin.adapters.service import missing_config, run_cycle
+
+    s = RuntimeSettings(
+        topology_path=str(tmp_path / "t.yaml"), ha_mapping_path=str(tmp_path / "m.yaml")
+    )
+    assert missing_config(s) == [s.topology_path, s.ha_mapping_path]
+    st = run_cycle(s, do_push=False)
+    assert not st.ok and st.error and "Konfiguration unvollständig" in st.error

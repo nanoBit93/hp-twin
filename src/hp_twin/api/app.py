@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from hp_twin.adapters.service import ServiceStatus, data_age_minutes, run_cycle
+from hp_twin.adapters.service import ServiceStatus, data_age_minutes, missing_config, run_cycle
 from hp_twin.adapters.settings import RuntimeSettings
 
 _STATIC = Path(__file__).parent / "static"
@@ -137,7 +137,9 @@ def post_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
     from hp_twin.adapters.bundle import apply_bundle
 
     try:
-        return apply_bundle(bundle, RuntimeSettings.load())
+        result = apply_bundle(bundle, RuntimeSettings.load())
+        globals()["_STATUS"] = ServiceStatus()  # alten Fehler (z. B. fehlende Config) verwerfen
+        return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -177,6 +179,7 @@ def status() -> dict[str, Any]:
     out["auto_push_enabled"] = s.auto_push_enabled
     out["schedule_interval_minutes"] = s.schedule_interval_minutes
     out["eos_configured"] = bool(s.eos_base_url and s.eos_managed_load_id)
+    out["missing_config"] = missing_config(s)
     return out
 
 

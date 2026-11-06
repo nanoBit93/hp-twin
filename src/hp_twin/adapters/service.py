@@ -58,6 +58,14 @@ def data_age_minutes(csv_path: str) -> float | None:
         return None
 
 
+def missing_config(settings: RuntimeSettings) -> list[str]:
+    """Für einen Zyklus nötige Konfigurationsdateien, die noch fehlen."""
+    need = [settings.topology_path]
+    if settings.export_before_push:
+        need.append(settings.ha_mapping_path)
+    return [f for f in need if not Path(f).exists()]
+
+
 def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
     """Führt einen Automatik-Zyklus aus und liefert den Status zurück."""
     from hp_twin.adapters.eos_connect import push_rest
@@ -68,6 +76,13 @@ def run_cycle(settings: RuntimeSettings, do_push: bool = True) -> ServiceStatus:
     st = ServiceStatus(running=True, last_run_iso=datetime.now(UTC).isoformat())
     try:
         settings.apply_ha_env()  # HA-Zugang aus den Settings (überschreibt .env)
+        missing = missing_config(settings)
+        if missing:
+            raise ValueError(
+                "Konfiguration unvollständig, es fehlt: "
+                + ", ".join(missing)
+                + " – im Dashboard unter 'Portable Konfiguration' ein Config-Bundle importieren."
+            )
         # 1) frischer Export (Startzustand ~ jetzt)
         if settings.export_before_push and Path(settings.ha_mapping_path).exists():
             st.exported_rows = export_to_csv(
