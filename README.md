@@ -104,5 +104,14 @@ EOS Connect läuft als HA-Add-on; hp-twin genauso. Siehe `hp-twin-addon/DOCS.md`
    das Add-on über den **Supervisor-Proxy** (`http://supervisor/core`), ein Long-Lived-Token ist
    nicht nötig.
 
+## Release (Add-on aktualisieren)
+Das Add-on installiert beim Build `hp-twin` aus Git per **Tag `v<version>`** (`version` in
+`hp-twin-addon/config.yaml`). Für ein Update: Version in `pyproject.toml` **und** `config.yaml`
+erhöhen, committen, Tag setzen und pushen:
+```bash
+git tag v0.1.4 && git push origin main v0.1.4
+```
+Danach in HA im Store nach Updates suchen. Die laufende Version steht im Dashboard-Header.
+
 ## Tests / Qualität
 `pytest` · `ruff check . && ruff format --check .` · `mypy src/hp_twin` · Docker: `docker compose up`.

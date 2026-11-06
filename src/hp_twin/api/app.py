@@ -85,6 +85,16 @@ def analysis(runs: int = 50, horizon_h: float = 48.0, from_end: bool = True) -> 
         raise HTTPException(status_code=409, detail=str(e)) from e
 
 
+@app.get("/api/version")
+def api_version() -> dict[str, str]:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return {"version": version("hp-twin")}
+    except PackageNotFoundError:  # pragma: no cover - nur ohne Installation
+        return {"version": "dev"}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}

@@ -33,3 +33,18 @@ def test_analysis_endpoint() -> None:
     assert j["forecast"]["mode"] == "live"
     assert len(j["forecast"]["p_el_mean_w"]) == 96
     assert "active_rooms" in j["factors"]
+
+
+def test_versions_in_sync() -> None:
+    """pyproject- und Add-on-Version müssen gleich sein (Add-on installiert Tag v<version>)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).parent.parent
+    py = re.search(r'^version = "([^"]+)"', (root / "pyproject.toml").read_text(), re.M)
+    ad = re.search(r'^version: "([^"]+)"', (root / "hp-twin-addon/config.yaml").read_text(), re.M)
+    assert py and ad and py.group(1) == ad.group(1)
+
+
+def test_api_version() -> None:
+    assert "version" in TestClient(app).get("/api/version").json()

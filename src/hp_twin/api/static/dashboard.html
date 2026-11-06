@@ -39,7 +39,7 @@
 </head>
 <body>
   <header>
-    <h1>🔥 hp-twin · Lastprognose-Dashboard</h1>
+    <h1>🔥 hp-twin · Lastprognose-Dashboard <span id="ver" style="font-size:12px;color:var(--muted);font-weight:400"></span></h1>
     <label>Horizont (h) <input id="horizon" type="number" value="48" /></label>
     <label>MC-Läufe <input id="runs" type="number" value="50" /></label>
     <label>Start <select id="fromend"><option value="true">Ende der Daten</option><option value="false">Anfang</option></select></label>
@@ -331,6 +331,7 @@
     document.getElementById('dryrun').addEventListener('click', ()=>pushNow(false));
 
     document.getElementById('refresh').addEventListener('click', load);
+    fetch('api/version').then(r=>r.json()).then(v=>document.getElementById('ver').textContent='v'+v.version).catch(()=>{});
     loadSettings(); loadModel(); refreshStatus(); setInterval(refreshStatus, 20000);
     load();
   </script>
