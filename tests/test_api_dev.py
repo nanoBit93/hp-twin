@@ -177,3 +177,32 @@ def test_existing_write_endpoints_have_auth(monkeypatch: pytest.MonkeyPatch, cli
     ):
         r = getattr(c, method)(path, **kwargs)
         assert r.status_code == 401, path
+
+
+def test_root_path_alone_is_not_ingress(monkeypatch: pytest.MonkeyPatch, client) -> None:
+    """Produktionsfall: uvicorn läuft mit --root-path <ingress>, aber ein Direktzugriff hat
+    kein Session-Cookie -> ohne Token 401, mit Token 200 (der root_path täuscht nicht)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("HP_TWIN_API_TOKEN", "s3cret")
+    # Add-on-Start simulieren: uvicorn läuft mit statischem --root-path (Ingress-Pfad).
+    from hp_twin.api.app import app as raw_app
+
+    mounted = FastAPI()
+    mounted.mount("", raw_app)  # root_path entsteht beim Mounten
+    sub = TestClient(mounted, root_path="/api/hassio_ingress/xyz")
+    r = sub.get("/api/dev/state", cookies={})
+    assert r.status_code == 401  # kein Cookie, kein Token
+    r = sub.get("/api/dev/state", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["meta"]["via_ingress"] is False  # root_path allein zählt NICHT als Ingress
+
+
+def test_request_meta_reports_auth_mode(client) -> None:
+    c = client
+    r = c.get("/api/dev/state")
+    meta = r.json()["meta"]
+    assert set(meta) == {"via_ingress", "token_required", "root_path"}
+    assert meta["token_required"] is False  # Test-Client-Runtime ohne Token

@@ -36,11 +36,10 @@ def api_token() -> str | None:
 
 def via_ingress(request: Request) -> bool:
     """True, wenn die Anfrage über den HA-Supervisor-Ingress-Proxy kommt."""
-    # 1) Proxy-Kette hat uns über --root-path eingebunden (Add-on-Start)
-    root = request.scope.get("root_path") or ""
-    if root and not root.startswith("/local"):
-        return True
-    # 2) Der Ingress-Proxy setzt das Session-Cookie; direkte Aufrufe haben es nicht.
+    # Der Supervisor-Ingress-Proxy leitet nur Anfragen mit seiner Session weiter (Cookie
+    # ingress_session). Achtung: root_path ist KEIN Indikator - das Add-on startet uvicorn
+    # mit dem (statischen) --root-path-Ingress-Pfad, sodass er auch bei Direktzugriffen
+    # gesetzt ist und Direktzugriffe sonst fälschlich als Ingress durchgelassen würden.
     return bool(request.cookies.get(_INGRESS_COOKIE))
 
 
