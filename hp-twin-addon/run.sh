@@ -5,6 +5,13 @@ set -e
 export HA_BASE_URL="http://supervisor/core"
 export HA_TOKEN="${SUPERVISOR_TOKEN}"
 
+# API-Token für direkte (nicht-Ingress) Zugriffe auf die Analyse-/Dev-API und Schreib-Endpunkte.
+# Leer = kein Token: Ingress und lokale Aufrufe erlaubt.
+API_TOKEN="$(bashio::config 'api_token')"
+if [ -n "${API_TOKEN}" ]; then
+  export HP_TWIN_API_TOKEN="${API_TOKEN}"
+fi
+
 cd /config
 mkdir -p config data/ha_export
 

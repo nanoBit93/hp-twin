@@ -66,7 +66,13 @@ def cycles_per_day(time_s: np.ndarray, compressor_on: np.ndarray) -> float:
 def rmse(a: np.ndarray, b: np.ndarray) -> float:
     a = np.asarray(a, float)
     b = np.asarray(b, float)
-    return float(np.sqrt(np.mean((a - b) ** 2)))
+    d = (a - b).astype(float)
+    # (a-b)**2 kann bei sehr großen Werten in float64 überlaufen -> mathematisch stabil rechnen.
+    with np.errstate(over="ignore", invalid="ignore"):
+        sq = np.square(d)
+    if not np.isfinite(sq).all():
+        return float("inf")
+    return float(np.sqrt(np.mean(sq)))
 
 
 @dataclass

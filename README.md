@@ -71,6 +71,18 @@ Im Dashboard unter **„⚙️ Automatik & EOS-Connect-Verbindung"** einstellbar
   Kalibrierung benutzt (Bundle-Import) statt aus wenigen Stunden zu fitten.
 - Endpunkte: `GET/POST /api/settings`, `POST /api/push_now` (startet im Hintergrund; `{"push":false}` = Dry-Run), `GET /api/status`.
 
+## Analyse-/Dev-API (Fernanschluss für die Entwicklung)
+Die laufende Instanz (HA Add-on) ist über die **Analyse-API** von der Entwickler-Maschine aus
+diagnostizierbar: Daten-/Startzustandsabfrage, Kalibrierung, **Zwischenschritt-Trace** (Regler-
+entscheid je Zeitschritt) und **Was-wäre-wen-Szenarien** mit Overrides auf Eingänge/Modell.
+Die verbindliche Referenz (Endpunkte, Auth, Python-Client, CLI, Debug-Rezepte) steht in
+**[docs/dev-api.md](docs/dev-api.md)**. Kurz:
+- Konfig auf der Entwickler-Maschine: `HP_TWIN_API_URL` + `HP_TWIN_API_TOKEN` in `.env`
+  (Add-on-Option `api_token` in HA setzen, der Port 8000 ist seit v0.1.4 im LAN offen).
+- Python: `from hp_twin.adapters.api_client import DevApiClient` · CLI: `hp-twin remote state`.
+- Schreib-Endpunkte (`POST /api/settings`, `/api/model`, `/api/bundle`, `/api/push_now`) sind
+  gleich mitgeschützt; über den Dashboard-Ingress entfällt der Token.
+
 ## Portable Konfiguration (Export/Import)
 Gesamte Konfiguration (+ optional Kalibrierung) als **eine Datei** sichern und in einer neuen
 Installation wiederherstellen – im Dashboard („Portable Konfiguration": ⬇ exportieren / ⬆ importieren)

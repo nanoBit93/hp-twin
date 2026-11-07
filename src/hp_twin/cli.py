@@ -6,11 +6,14 @@ import argparse
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
 from hp_twin.adapters.io_yaml import load_topology
+
+if TYPE_CHECKING:
+    from hp_twin.adapters.api_client import DevApiClient
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -352,6 +355,74 @@ def _cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _remote_client(env_path: str, timeout_s: float) -> DevApiClient:
+    from hp_twin.adapters.api_client import DevApiClient
+
+    return DevApiClient.from_env(env_path, timeout_s=timeout_s)
+
+
+def _print_remote_error(e: Exception) -> int:
+    print(f"Fehler: {e}", file=sys.stderr)
+    print(
+        "Zugang prüfen: HP_TWIN_API_URL/HP_TWIN_API_TOKEN in .env (Vorlage .env.example).",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _cmd_remote(args: argparse.Namespace) -> int:
+    """Analyse-API einer entfernten hp-twin-Instanz abfragen (state|data|calibration|trace)."""
+    import json
+
+    try:
+        client = _remote_client(args.env, args.timeout)
+    except ValueError as e:
+        return _print_remote_error(e)
+    try:
+        if args.action == "state":
+            out = client.state()
+        elif args.action == "calibration":
+            out = client.calibration()
+        elif args.action == "data":
+            out = client.data(start=args.start, end=args.end)
+        else:  # trace
+            out = client.trace(start=args.start, horizon_h=args.horizon_h, trace_step_s=args.step)
+    except Exception as e:  # noqa: BLE001 - CLI-Fehlerausgabe
+        return _print_remote_error(e)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_remote_scenario(args: argparse.Namespace) -> int:
+    """Was-wäre-wen gegen die entfernte Instanz (single oder --file-Batch)."""
+    import json
+
+    try:
+        client = _remote_client(args.env, args.timeout)
+    except ValueError as e:
+        return _print_remote_error(e)
+    body: dict[str, object] = {
+        "horizon_h": args.horizon_h,
+        "trace": args.trace,
+        "trace_step_s": args.step,
+        "overrides": json.loads(Path(args.overrides).read_text(encoding="utf-8"))
+        if args.overrides
+        else {},
+    }
+    if args.start:
+        body["start"] = args.start
+    try:
+        out = (
+            client.scenarios([json.loads(Path(f).read_text(encoding="utf-8")) for f in args.batch])
+            if args.batch
+            else client.post("/api/dev/scenario", body)
+        )
+    except Exception as e:  # noqa: BLE001 - CLI-Fehlerausgabe
+        return _print_remote_error(e)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="hp-twin")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -421,6 +492,40 @@ def main(argv: list[str] | None = None) -> int:
     bd.add_argument("--include-secrets", action="store_true")
     bd.add_argument("--no-calibration", action="store_true")
     bd.set_defaults(func=_cmd_bundle)
+
+    rm = sub.add_parser(
+        "remote",
+        help="Analyse-API der laufenden hp-twin-Instanz abfragen (state|data|calibration|trace)",
+    )
+    rm.add_argument("action", choices=["state", "data", "calibration", "trace"])
+    rm.add_argument("--start", default=None, help="UTC-ISO Fenster-/Simulationsstart")
+    rm.add_argument("--end", default=None, help="UTC-ISO Fensterende (nur: data)")
+    rm.add_argument("--horizon-h", type=float, default=6.0, help="Simulationslänge (trace)")
+    rm.add_argument("--step", type=float, default=300.0, help="Trace-Auflösung in Sekunden (trace)")
+    rm.add_argument("--env", default=".env")
+    rm.add_argument("--timeout", type=float, default=180.0)
+    rm.set_defaults(func=_cmd_remote)
+
+    rs = sub.add_parser(
+        "remote-scenario",
+        help="Was-wäre-wen gegen die entfernte Instanz (Overrides als JSON-Datei)",
+    )
+    rs.add_argument("--start", default=None, help="UTC-ISO Fensterstart")
+    rs.add_argument("--horizon-h", type=float, default=24.0)
+    rs.add_argument(
+        "--overrides", default=None, help="JSON-Datei mit Overrides (siehe docs/dev-api.md)"
+    )
+    rs.add_argument("--trace", action="store_true", help="Zwischenschritte mitschicken")
+    rs.add_argument("--step", type=float, default=300.0, help="Trace-Auflösung in Sekunden")
+    rs.add_argument(
+        "--batch",
+        nargs="*",
+        default=None,
+        help="mehrere Szenario-JSON-Dateien -> POST /api/dev/scenarios",
+    )
+    rs.add_argument("--env", default=".env")
+    rs.add_argument("--timeout", type=float, default=180.0)
+    rs.set_defaults(func=_cmd_remote_scenario)
 
     args = p.parse_args(argv)
     return int(args.func(args))

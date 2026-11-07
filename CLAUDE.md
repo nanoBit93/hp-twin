@@ -26,3 +26,11 @@ Warmwasservorrang, Parallelbetrieb, min_off 30 min, Heizstab nur Notbetrieb (Pha
 ## Befehle
 - Setup: `uv venv --python 3.12 && uv pip install -e ".[dev]"`
 - Tests: `pytest` · Lint: `ruff check . && ruff format --check .` · Typen: `mypy src/hp_twin`
+
+## Analyse-API (Fern-Zugriff auf die laufende Instanz)
+Die laufende Add-on-Instanz ist per Dev-API diagnostizierbar (Daten, Kalibrierung,
+Zwischenschritt-Trace, Was-wäre-wen-Szenarien). **Bevor Muster/Abläufe der Produktion analysiert
+werden: `docs/dev-api.md` lesen** — sie beschreibt Endpunkte, Auth (`HP_TWIN_API_URL` +
+`HP_TWIN_API_TOKEN` in `.env`), Python-Client (`hp_twin.adapters.api_client.DevApiClient`) und
+CLI (`hp-twin remote ...`). Locales Debugging gegen den lokalen Server benutzt dieselben
+Endpunkte mit `http://localhost:8000`.

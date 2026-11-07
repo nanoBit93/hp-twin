@@ -1,6 +1,6 @@
-# Home-Assistant-App (Add-on): hp-twin – Wärmepumpen-Lastprognose für EOS Connect
+# Home-Assistant-Add-on: hp-twin – Wärmepumpen-Lastprognose für EOS Connect
 name: hp-twin Wärmepumpen-Zwilling
-version: "0.1.3"
+version: "0.1.4"
 slug: hp_twin
 description: >-
   Zustandsbasierte 48-h-Lastprognose der Wärmepumpe (Monte-Carlo) mit
@@ -13,6 +13,12 @@ ingress: true
 ingress_port: 8000
 panel_icon: mdi:heat-pump
 panel_title: hp-twin
+# API-Port zusätzlich im Netz freigeben (Direktzugriff auf die Analyse-/Dev-API von außen;
+# Ingress bleibt unberührt). Wer das nicht will, entfernt den Block wieder.
+ports:
+  8000/tcp: 8000
+ports_description:
+  8000/tcp: Analysis/Dev-API (Auth per Bearer-Token, siehe DOCS.md)
 # HA-Core-API (Sensoren lesen) über den Supervisor-Proxy – kein Long-Lived-Token nötig
 homeassistant_api: true
 # Add-on-eigener Konfigurationsordner (im Container /config; per Samba als "addon_configs" erreichbar)
@@ -27,6 +33,7 @@ options:
   horizon_h: 48
   dhw_setpoint_cap_c: 45
   auto_push_enabled: false
+  api_token: ""
 schema:
   eos_base_url: str?
   eos_managed_load_id: str?
@@ -34,3 +41,4 @@ schema:
   horizon_h: float(1,48)
   dhw_setpoint_cap_c: "float?"
   auto_push_enabled: bool
+  api_token: str?

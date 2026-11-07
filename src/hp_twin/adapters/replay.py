@@ -7,6 +7,7 @@ Startzustand aus Messdaten, Vorwärtssimulation mit GEMESSENEM Wetter und GEMESS
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +20,7 @@ from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.consumers import CompositeLoad, HeatingCircuitLoad, MultiZoneHeatingLoad
 from hp_twin.domain.controller import Controller, ControllerState, Mode, Setpoints
 from hp_twin.domain.model_config import ModelConfig
-from hp_twin.domain.simulator import SimConfig, SimResult, Simulator
+from hp_twin.domain.simulator import SimConfig, SimResult, Simulator, StepTrace
 from hp_twin.domain.storage import StorageState, StratifiedStorage
 from hp_twin.domain.topology import Topology
 
@@ -139,6 +140,8 @@ def build_replay(
     demand_scale: float = 1.0,
     model: ModelConfig | None = None,
     ctrl_state: ControllerState | None = None,
+    room_setpoint_override: np.ndarray | None = None,
+    trace_callback: Callable[[float, int, StepTrace], None] | None = None,
 ) -> ReplayOutput:
     model = model or ModelConfig()
     lp = model.load
@@ -186,8 +189,12 @@ def build_replay(
             )
         fallback = float(np.nanmedian(room_set_arr)) if np.isfinite(room_set_arr).any() else 20.5
         room_set_arr = np.where(np.isfinite(room_set_arr), room_set_arr, fallback)
+        if room_setpoint_override is not None:
+            room_set_arr = np.asarray(room_setpoint_override, dtype=float)[:n]
     else:
         room_set_arr = np.full(n, float(np.median(sl[rooms].to_numpy())))
+        if room_setpoint_override is not None:
+            room_set_arr = np.asarray(room_setpoint_override, dtype=float)[:n]
     room0 = float(room_set_arr[0])
 
     def idx(t_s: float) -> int:
@@ -303,5 +310,6 @@ def build_replay(
         load=load,
         outdoor=outdoor,
         ctrl_state=copy.copy(ctrl_state) if ctrl_state is not None else None,
+        trace_callback=trace_callback,
     )
     return ReplayOutput(result=result, measured=sl, buffer_node=buffer_node, dhw_node=dhw_node)

@@ -9,12 +9,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hp_twin.adapters.service import ServiceStatus, data_age_minutes, missing_config, run_cycle
 from hp_twin.adapters.settings import RuntimeSettings
+from hp_twin.api.dev import router as dev_router
+from hp_twin.api.security import require_write
 
 _STATIC = Path(__file__).parent / "static"
 _STATUS = ServiceStatus()
@@ -52,6 +54,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="hp-twin", version="0.1.0", lifespan=_lifespan)
+app.include_router(dev_router)
 
 
 @app.get("/")
@@ -107,8 +110,9 @@ def get_settings() -> dict[str, Any]:
 
 
 @app.post("/api/settings")
-def post_settings(patch: dict[str, Any]) -> dict[str, Any]:
+def post_settings(patch: dict[str, Any], request: Request) -> dict[str, Any]:
     """Teil-Update der Einstellungen. Leeres eos_token lässt das bestehende Token unangetastet."""
+    require_write(request)
     cur = RuntimeSettings.load()
     data = cur.model_dump()
     for k, v in patch.items():
@@ -142,8 +146,9 @@ def get_bundle(include_secrets: bool = False, include_calibration: bool = True) 
 
 
 @app.post("/api/bundle")
-def post_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+def post_bundle(bundle: dict[str, Any], request: Request) -> dict[str, Any]:
     """Bundle anwenden (Config-Dateien schreiben). Vorhandene Secrets bleiben erhalten."""
+    require_write(request)
     from hp_twin.adapters.bundle import apply_bundle
 
     try:
@@ -164,8 +169,9 @@ def get_model() -> dict[str, Any]:
 
 
 @app.post("/api/model")
-def post_model(patch: dict[str, Any]) -> dict[str, Any]:
+def post_model(patch: dict[str, Any], request: Request) -> dict[str, Any]:
     """Speichert Modell-Parameter (verschachtelt) nach model_path (config/model.yaml)."""
+    require_write(request)
     import yaml
 
     from hp_twin.domain.model_config import ModelConfig
@@ -195,12 +201,13 @@ def status() -> dict[str, Any]:
 
 
 @app.post("/api/push_now")
-def push_now(body: dict[str, Any] | None = None) -> dict[str, Any]:
+def push_now(request: Request, body: dict[str, Any] | None = None) -> dict[str, Any]:
     """Startet sofort einen Zyklus im HINTERGRUND (Export->Forecast->Push) und kehrt zurück.
 
     Ein Backfill kann Minuten dauern; Fortschritt und Ergebnis über GET /api/status.
     body={"push":false} = Dry-Run.
     """
+    require_write(request)
     settings = RuntimeSettings.load()
     do_push = True if body is None else bool(body.get("push", True))
     if _RUN_LOCK.locked():
