@@ -43,6 +43,7 @@ def build_analysis(
     cap = model.forecast.dhw_setpoint_cap_c
     weather: pd.DataFrame | None = None
     weather_meta: dict[str, Any] = {}
+    sg_plan_meta: dict[str, Any] = {"enabled": False}
     if live and settings is not None and settings.weather_entity:
         from hp_twin.adapters.forecast import fetch_live_weather
         from hp_twin.adapters.weather_forecast import forecast_horizon_hours
@@ -103,6 +104,35 @@ def build_analysis(
 
     # Kontext: die letzten 24 h Messung (negative Stunden = Vergangenheit)
     history: dict[str, Any] = {}
+
+    sg_plan_meta = {"enabled": bool(settings is not None and settings.sg_enabled)}
+    if live and sg_plan_meta["enabled"] and settings is not None:
+        from hp_twin.adapters.evcc import fetch_market_series_safe
+        from hp_twin.adapters.sg_orchestrator import SgPlanConfig, run_sg_cycle
+
+        sg_cfg = SgPlanConfig(
+            enabled=True,
+            sg3_load_id=settings.sg_load_id,
+            profile_load_id=settings.profile_load_id,
+            min_pv_surplus_w=float(settings.sg_min_pv_surplus_w),
+            max_price_eur=settings.sg_max_price_eur,
+            dry_run=True,  # Analysis ist lesend -> nichts pushen; Placement via Folgetakt
+        )
+        try:
+            _, sg_res = run_sg_cycle(
+                df,
+                topology,
+                calib,
+                model,
+                forecast_fn=run_live_forecast,
+                market=fetch_market_series_safe(settings),
+                cfg=sg_cfg,
+                eos_base_url="",
+            )
+            sg_plan_meta.update(sg_res.to_dict())
+        except (ValueError, RuntimeError) as e:
+            sg_plan_meta["notes"] = [f"SG-Zyklus fehlgeschlagen: {e}"]
+
     if live:
         dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
         h24 = df.iloc[-int(round(86400 / dt_s)) :]
@@ -139,4 +169,5 @@ def build_analysis(
         "sim": sim,
         "history": history,
         "forecast": forecast,
+        "sg_plan": sg_plan_meta,
     }

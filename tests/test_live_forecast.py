@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from hp_twin.adapters.io_csv import validate_frame
 from hp_twin.adapters.replay import build_forecast_frame, initial_controller_state
@@ -39,6 +40,21 @@ def test_forecast_frame_repeats_last_24h() -> None:
     assert np.allclose(fr["t_outdoor_c"].iloc[:per_day], df["t_outdoor_c"].iloc[-per_day:])
     assert np.allclose(
         fr["t_outdoor_c"].iloc[per_day : 2 * per_day], fr["t_outdoor_c"].iloc[:per_day]
+    )
+
+
+def test_forecast_frame_strips_sg3_by_default() -> None:
+    df = _df()
+    # SG3 in der Sollwertspur der letzten 24 h: HK1 32 -> 44 °C Block
+    df.loc[df.index[-400:-200], "setpoint_hk1_c"] = 44.0
+    fr_stripped = build_forecast_frame(df, horizon_h=48.0, strip_sg3=True)
+    fr_raw = build_forecast_frame(df, horizon_h=48.0, strip_sg3=False)
+    per_day = int(86400 / (df.index[1] - df.index[0]).total_seconds())
+    # Ohne Strip: Spur wiederholt gestern inkl. 44-°C-Block; mit Strip: max auf SG2-Niveau
+    assert fr_raw["setpoint_hk1_c"].max() == pytest.approx(44.0)
+    assert fr_stripped["setpoint_hk1_c"].max() < fr_raw["setpoint_hk1_c"].max()
+    assert np.allclose(
+        fr_raw["setpoint_hk1_c"].iloc[:per_day], df["setpoint_hk1_c"].iloc[-per_day:]
     )
 
 

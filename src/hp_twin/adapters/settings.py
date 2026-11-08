@@ -38,6 +38,14 @@ class RuntimeSettings(BaseModel):
     # Wetterprognose (DWD über Home Assistant): Weather-Entity des Standorts
     weather_entity: str = ""  # z. B. weather.duesseldorf; leer = Fallback 'gestern wie heute'
     weather_required: bool = False  # True: Prognose bricht ab, wenn HA/Wetter nicht erreichbar
+    # SG3-Planung (Energiesystem-Koppelung über EOS Connect)
+    sg_enabled: bool = False
+    sg_dry_run: bool = True  # True: Kandidaten+Placement berechnen, aber nichts pushen
+    sg_load_id: str = "sg3_req"
+    profile_load_id: str = "hp_ext"
+    sg_min_pv_surplus_w: float = 2500.0
+    sg_max_price_eur: float | None = None
+    evcc_entities: dict[str, str] = Field(default_factory=dict)  # override defaults
     # EOS Connect
     eos_base_url: str = ""
     eos_managed_load_id: str = ""

@@ -30,7 +30,8 @@ class HaClient:
 
     @classmethod
     def from_env(cls, dotenv_path: str = ".env", timeout_s: float = 30.0) -> HaClient:
-        load_dotenv(dotenv_path)
+        load_dotenv(dotenv_path, prefixes=("HA_",))  # nur HA-*: API-Tokens aus der .env
+        # dürfen die lokale API nicht färben (security.api_token liest dieselbe Var)
         base = os.environ.get("HA_BASE_URL", "").rstrip("/")
         token = os.environ.get("HA_TOKEN", "")
         if not base or not token:

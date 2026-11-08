@@ -29,7 +29,7 @@ def test_analysis_endpoint() -> None:
     r = client.get("/api/analysis?runs=5&horizon_h=24&from_end=true")
     assert r.status_code == 200
     j = r.json()
-    assert set(j.keys()) == {"config", "calibration", "factors", "sim", "history", "forecast"}
+    assert set(j.keys()) >= {"config", "calibration", "factors", "sim", "history", "forecast"}
     assert j["forecast"]["mode"] == "live"
     assert len(j["forecast"]["p_el_mean_w"]) == 96
     assert "active_rooms" in j["factors"]

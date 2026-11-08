@@ -97,7 +97,10 @@ def initial_controller_state(df: pd.DataFrame, min_off_s: float) -> ControllerSt
 
 
 def build_forecast_frame(
-    df: pd.DataFrame, horizon_h: float, weather: pd.DataFrame | None = None
+    df: pd.DataFrame,
+    horizon_h: float,
+    weather: pd.DataFrame | None = None,
+    strip_sg3: bool = True,
 ) -> pd.DataFrame:
     """Eingangsrahmen für eine ECHTE Vorwärtsprognose ab dem letzten Messpunkt.
 
@@ -105,6 +108,11 @@ def build_forecast_frame(
     Soll-/Raumsollwerte, SG) = die letzten 24 h, täglich wiederholt ("gestern wie heute"). Ein
     Wetter-Vorhersage-Frame (z. B. DWD über Home Assistant, adapters/weather_forecast) ersetzt
     t_outdoor_c/ghi_wm2 im Vorhersagezeitraum; danach gilt weiter der Wiederholungs-Fallback.
+
+    strip_sg3=True (Standard) ersetzt die SG3-Blöcke in den Sollwert-Spuren durch das
+    SG2-Grundprogramm (domain/sg_plan): Die Basis-Prognose ist dann "SG2 only" und SG3-
+    Läufe werden nur dort eingeplant, wo der SG-Orchestrator sie bewusst setzt - nicht
+    als stille Wiederholung des gestrigen Tagesverlaufs.
     """
     dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
     per_day = int(round(86400.0 / dt_s))
@@ -129,6 +137,30 @@ def build_forecast_frame(
         fut[col] = last[col]
     if weather is not None and len(weather):
         fut = merge_forecast_columns(fut, weather)
+    if strip_sg3:
+        fut = _strip_sg3_columns(fut)
+    return fut
+
+
+def _strip_sg3_columns(fut: pd.DataFrame) -> pd.DataFrame:
+    """SG3-Blöcke in den Sollwert-Spuren des Zukunftsframes durch SG2-Grundprogramm ersetzen."""
+    from hp_twin.domain.sg_plan import sg3_mask, strip_sg3_setpoints
+
+    if "setpoint_hk1_c" not in fut.columns or fut.empty:
+        return fut
+    hk1 = fut["setpoint_hk1_c"].to_numpy(dtype=float)
+    sg_status = fut["sg_status"].to_numpy(dtype=float) if "sg_status" in fut.columns else None
+    mask = sg3_mask(sg_status, hk1)
+    if not mask.any():
+        return fut
+    series = {"setpoint_hk1_c": hk1}
+    if "setpoint_dhw_c" in fut.columns:
+        series["setpoint_dhw_c"] = fut["setpoint_dhw_c"].to_numpy(dtype=float)
+    for col in [c for c in fut.columns if c.startswith("setpoint_room_") and c.endswith("_c")]:
+        series[col] = fut[col].to_numpy(dtype=float)
+    stripped = strip_sg3_setpoints(series, mask)
+    for name, vals in stripped.items():
+        fut[name] = vals
     return fut
 
 

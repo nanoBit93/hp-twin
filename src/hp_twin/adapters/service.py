@@ -31,6 +31,7 @@ class ServiceStatus:
     phase: str | None = None
     weather_source: str | None = None
     weather_hours: float | None = None
+    sg_plan: dict[str, Any] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +48,7 @@ class ServiceStatus:
             "phase": self.phase,
             "weather_source": self.weather_source,
             "weather_hours": self.weather_hours,
+            "sg_plan": self.sg_plan,
             **self.extra,
         }
 
@@ -105,8 +107,10 @@ def run_cycle(
 ) -> ServiceStatus:
     """Ein Automatik-Zyklus. Aktualisiert `status` fortlaufend (für die Fortschrittsanzeige)."""
     from hp_twin.adapters.eos_connect import push_rest
+    from hp_twin.adapters.evcc import fetch_market_series_safe
     from hp_twin.adapters.forecast import fetch_live_weather, run_live_forecast
     from hp_twin.adapters.ha_history import export_to_csv
+    from hp_twin.adapters.sg_orchestrator import SgPlanConfig
     from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
@@ -152,9 +156,34 @@ def run_cycle(
             st.weather_hours = round(
                 float((weather.index.max() - weather.index.min()).total_seconds() / 3600.0), 1
             )
-        fc = run_live_forecast(
-            df, topo, calib, horizon_h=settings.horizon_h, model=model, weather=weather
+        sg_cfg = SgPlanConfig(
+            enabled=bool(settings.sg_enabled),
+            sg3_load_id=str(settings.sg_load_id or "sg3_req"),
+            profile_load_id=str(settings.profile_load_id or "hp_ext"),
+            min_pv_surplus_w=float(settings.sg_min_pv_surplus_w),
+            max_price_eur=settings.sg_max_price_eur,
+            dry_run=bool(settings.sg_dry_run),
         )
+        market = fetch_market_series_safe(settings)
+        if sg_cfg.enabled:
+            from hp_twin.adapters.sg_orchestrator import run_sg_cycle
+
+            fc, sg_res = run_sg_cycle(
+                df,
+                topo,
+                calib,
+                model,
+                forecast_fn=run_live_forecast,
+                market=market,
+                cfg=sg_cfg,
+                eos_base_url=settings.eos_base_url,
+                eos_token=settings.eos_token,
+            )
+            st.sg_plan = sg_res.to_dict()
+        else:
+            fc = run_live_forecast(
+                df, topo, calib, horizon_h=settings.horizon_h, model=model, weather=weather
+            )
         st.n_events = len(fc.events)
         st.planned_kwh = round(float(fc.slots.energy_wh.sum()) / 1000, 2)
         st.data_age_minutes = data_age_minutes(settings.csv_path)
