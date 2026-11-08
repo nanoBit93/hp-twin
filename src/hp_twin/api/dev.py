@@ -83,7 +83,9 @@ def _series(a: Any, nd: int = 1) -> list[float | None]:
 
 
 def _parse_utc(ts: str) -> pd.Timestamp:
-    t = pd.Timestamp(ts)
+    # '+' in der Zeitzone ('+00:00') wird im Query-String serverseitig als Leerzeichen
+    # dekodiert ('...00:25:00 00:00'); die ZEITZONE wiederherstellen, dann parsen.
+    t = pd.Timestamp(ts[: -len(" 00:00")] + "+00:00") if ts.endswith(" 00:00") else pd.Timestamp(ts)
     return t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
 
 

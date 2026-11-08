@@ -53,9 +53,39 @@ class HaClient:
     def ping(self) -> str:
         return str(self._get("/api/")["message"])
 
+    def state(self, entity_id: str) -> dict[str, Any]:
+        """Einzelner Entity-State (entity_id, state, attributes)."""
+        return dict(self._get(f"/api/states/{urllib.parse.quote(entity_id)}"))
+
     def states(self) -> list[dict[str, Any]]:
         """Alle aktuellen Entity-States (entity_id, state, attributes)."""
         return list(self._get("/api/states"))
+
+    def post_response(self, path: str, payload: dict[str, Any]) -> Any:
+        """Service-Aufruf mit Antwort (`?return_response`); liefert `service_response`."""
+        sep = "&" if "?" in path else "?"
+        return self._post_json(f"{path}{sep}return_response", payload)
+
+    def _post_json(self, path: str, payload: dict[str, Any]) -> Any:
+        req = urllib.request.Request(
+            f"{self.base_url}{path}",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # noqa: S310
+                body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:  # pragma: no cover - netzwerkabhängig
+            raise HaError(f"HTTP {e.code} bei {path}: {e.read().decode('utf-8')[:200]}") from e
+        except urllib.error.URLError as e:  # pragma: no cover
+            raise HaError(f"Verbindung fehlgeschlagen zu {self.base_url}: {e.reason}") from e
+        if isinstance(body, dict) and set(body) == {"changed_states", "service_response"}:
+            return body["service_response"]
+        return body
 
     def history(
         self, entity_ids: list[str], start: datetime, end: datetime, minimal: bool = True

@@ -35,6 +35,9 @@ class RuntimeSettings(BaseModel):
     forecast_runs: int = Field(default=100, ge=1, le=1000)
     horizon_h: float = Field(default=48.0, gt=0, le=48)
     dhw_setpoint_cap_c: float | None = 45.0
+    # Wetterprognose (DWD über Home Assistant): Weather-Entity des Standorts
+    weather_entity: str = ""  # z. B. weather.duesseldorf; leer = Fallback 'gestern wie heute'
+    weather_required: bool = False  # True: Prognose bricht ab, wenn HA/Wetter nicht erreichbar
     # EOS Connect
     eos_base_url: str = ""
     eos_managed_load_id: str = ""

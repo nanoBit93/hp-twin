@@ -6,6 +6,7 @@ Entladerate, Solargewinne und Gebäudemasse. Alle Parameter kommen aus ModelConf
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +19,7 @@ from hp_twin.adapters.replay import (
     build_replay,
     initial_controller_state,
 )
+from hp_twin.adapters.settings import RuntimeSettings
 from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.controller import ControllerState
 from hp_twin.domain.model_config import ModelConfig
@@ -28,6 +30,8 @@ from hp_twin.domain.montecarlo import (
     extract_events,
 )
 from hp_twin.domain.topology import Topology
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -125,20 +129,44 @@ def run_forecast(
     )
 
 
+def fetch_live_weather(settings: RuntimeSettings, df: pd.DataFrame) -> pd.DataFrame | None:
+    """DWD-Vorhersage über Home Assistant abholen (Start = letzte Messung).
+
+    Liefert None, wenn keine Weather-Entity konfiguriert oder HA nicht erreichbar ist
+    (Prognose fällt in dem Fall auf den 24-h-Wiederholungs-Fallback zurück).
+    """
+    if not settings.weather_entity:
+        return None
+    from hp_twin.adapters.home_assistant import HaClient, HaError
+    from hp_twin.adapters.weather_forecast import fetch_weather_forecast
+
+    settings.apply_ha_env()
+    try:
+        client = HaClient.from_env(settings.env_path)
+        return fetch_weather_forecast(client, settings.weather_entity)
+    except HaError as e:
+        if settings.weather_required:
+            raise
+        log.warning(" Wetterprognose nicht verfügbar, Fallback 'gestern wie heute': %s", e)
+        return None
+
+
 def run_live_forecast(
     df: pd.DataFrame,
     topology: Topology,
     calib: CalibrationReport,
     horizon_h: float | None = None,
     model: ModelConfig | None = None,
+    weather: pd.DataFrame | None = None,
 ) -> ForecastResult:
     """ECHTE Vorwärtsprognose ab dem letzten Messpunkt ("jetzt").
 
     Startzustand: letzte gemessene Speichertemperaturen + Reglerzustand (läuft/Pause seit ...).
-    Zukünftige Eingänge: letzte 24 h täglich wiederholt (siehe build_forecast_frame).
+    Zukünftige Eingänge: Wetter optional über einen Vorhersage-Frame (DWD via Home Assistant),
+    Rest (Soll-/Raumsollwerte, SG) letzte 24 h täglich wiederholt (siehe build_forecast_frame).
     """
     model = model or ModelConfig()
     horizon_h = horizon_h if horizon_h is not None else model.sim.horizon_h
-    frame = build_forecast_frame(df, horizon_h)
+    frame = build_forecast_frame(df, horizon_h, weather=weather)
     cs = initial_controller_state(df, topology.controller.min_off_s)
     return run_forecast(frame, topology, calib, 0, horizon_h=horizon_h, model=model, ctrl_state=cs)

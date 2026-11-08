@@ -83,7 +83,7 @@ def analysis(runs: int = 50, horizon_h: float = 48.0, from_end: bool = True) -> 
             status_code=404, detail="Keine Messdaten (CSV) – erst 'Push jetzt'/Dry-Run"
         )
     try:
-        return build_analysis(df, topo, calib, model, live=from_end)
+        return build_analysis(df, topo, calib, model, live=from_end, settings=settings)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
 
@@ -226,11 +226,12 @@ class SimulateRequest(BaseModel):
     dhw_setpoint_cap_c: float | None = 45.0
     ttl_minutes: int | None = None
     from_end: bool = True
+    use_weather: bool = True
 
 
 @app.post("/simulate")
 def simulate(req: SimulateRequest) -> dict[str, Any]:
-    from hp_twin.adapters.forecast import run_forecast, run_live_forecast
+    from hp_twin.adapters.forecast import fetch_live_weather, run_forecast, run_live_forecast
     from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
@@ -247,7 +248,10 @@ def simulate(req: SimulateRequest) -> dict[str, Any]:
     if df is None:
         raise HTTPException(status_code=404, detail="Keine Messdaten (CSV)")
     if req.from_end:  # echte Prognose ab jetzt
-        fc = run_live_forecast(df, topo, calib, horizon_h=req.horizon_h, model=model)
+        weather = fetch_live_weather(settings, df) if req.use_weather else None
+        fc = run_live_forecast(
+            df, topo, calib, horizon_h=req.horizon_h, model=model, weather=weather
+        )
     else:  # Replay ab Datenanfang (Debug)
         fc = run_forecast(df, topo, calib, 0, horizon_h=req.horizon_h, model=model)
     return {"n_events": len(fc.events), **fc.to_dict()}

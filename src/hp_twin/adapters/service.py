@@ -29,6 +29,8 @@ class ServiceStatus:
     exported_rows: int | None = None
     running: bool = False
     phase: str | None = None
+    weather_source: str | None = None
+    weather_hours: float | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,6 +45,8 @@ class ServiceStatus:
             "exported_rows": self.exported_rows,
             "running": self.running,
             "phase": self.phase,
+            "weather_source": self.weather_source,
+            "weather_hours": self.weather_hours,
             **self.extra,
         }
 
@@ -101,7 +105,7 @@ def run_cycle(
 ) -> ServiceStatus:
     """Ein Automatik-Zyklus. Aktualisiert `status` fortlaufend (für die Fortschrittsanzeige)."""
     from hp_twin.adapters.eos_connect import push_rest
-    from hp_twin.adapters.forecast import run_live_forecast
+    from hp_twin.adapters.forecast import fetch_live_weather, run_live_forecast
     from hp_twin.adapters.ha_history import export_to_csv
     from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
@@ -142,7 +146,15 @@ def run_cycle(
 
         # 3) ECHTE Vorwärtsprognose ab dem letzten Messpunkt
         st.phase = "Prognose"
-        fc = run_live_forecast(df, topo, calib, horizon_h=settings.horizon_h, model=model)
+        weather = fetch_live_weather(settings, df)
+        if weather is not None:
+            st.weather_source = str(settings.weather_entity)
+            st.weather_hours = round(
+                float((weather.index.max() - weather.index.min()).total_seconds() / 3600.0), 1
+            )
+        fc = run_live_forecast(
+            df, topo, calib, horizon_h=settings.horizon_h, model=model, weather=weather
+        )
         st.n_events = len(fc.events)
         st.planned_kwh = round(float(fc.slots.energy_wh.sum()) / 1000, 2)
         st.data_age_minutes = data_age_minutes(settings.csv_path)

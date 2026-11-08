@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from hp_twin.adapters.io_csv import room_columns
+from hp_twin.adapters.weather_forecast import merge_forecast_columns
 from hp_twin.domain.building import RC2R2C, BuildingState
 from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.consumers import CompositeLoad, HeatingCircuitLoad, MultiZoneHeatingLoad
@@ -95,12 +96,15 @@ def initial_controller_state(df: pd.DataFrame, min_off_s: float) -> ControllerSt
     )
 
 
-def build_forecast_frame(df: pd.DataFrame, horizon_h: float) -> pd.DataFrame:
+def build_forecast_frame(
+    df: pd.DataFrame, horizon_h: float, weather: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Eingangsrahmen für eine ECHTE Vorwärtsprognose ab dem letzten Messpunkt.
 
     Anfangszustand = letzte Messwerte (Speicher). Zukünftige Eingänge (Außentemperatur, Strahlung,
-    Soll-/Raumsollwerte, SG) = die letzten 24 h, täglich wiederholt ("gestern wie heute"). Das ist
-    eine Näherung; ein Wetterprognose-Adapter kann diese Spalten später ersetzen.
+    Soll-/Raumsollwerte, SG) = die letzten 24 h, täglich wiederholt ("gestern wie heute"). Ein
+    Wetter-Vorhersage-Frame (z. B. DWD über Home Assistant, adapters/weather_forecast) ersetzt
+    t_outdoor_c/ghi_wm2 im Vorhersagezeitraum; danach gilt weiter der Wiederholungs-Fallback.
     """
     dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
     per_day = int(round(86400.0 / dt_s))
@@ -123,6 +127,8 @@ def build_forecast_frame(df: pd.DataFrame, horizon_h: float) -> pd.DataFrame:
     fut.loc[first, "t_hk1_c"] = last["t_hk1_c"]
     for col in room_columns(fut.reset_index()):
         fut[col] = last[col]
+    if weather is not None and len(weather):
+        fut = merge_forecast_columns(fut, weather)
     return fut
 
 

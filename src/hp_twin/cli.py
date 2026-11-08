@@ -285,7 +285,12 @@ def _plot_replay(rep: Any, met: Any, out: str) -> None:
 def _cmd_forecast(args: argparse.Namespace) -> int:
     import json
 
-    from hp_twin.adapters.forecast import run_forecast, run_live_forecast
+    from hp_twin.adapters.forecast import (
+        fetch_live_weather,
+        run_forecast,
+        run_live_forecast,
+    )
+    from hp_twin.adapters.settings import RuntimeSettings
     from hp_twin.domain.model_config import ModelConfig
 
     model = ModelConfig.from_path(args.model)
@@ -294,10 +299,25 @@ def _cmd_forecast(args: argparse.Namespace) -> int:
     model.forecast.dhw_setpoint_cap_c = args.dhw_cap
     model.forecast.eos_ttl_minutes = args.ttl_minutes
     topo, df, calib = _calibrate_report(args.topology, args.csv, model=model)
+    weather = None
+    if args.weather and not args.replay:
+        settings = RuntimeSettings.load()
+        settings.weather_entity = args.weather
+        weather = fetch_live_weather(settings, df)
     if args.replay:  # Debug: Replay ab Datenanfang mit gemessenem Wetter
         fc = run_forecast(df, topo, calib, 0, horizon_h=args.horizon_h, model=model)
     else:  # echte Prognose ab dem letzten Messpunkt
-        fc = run_live_forecast(df, topo, calib, horizon_h=args.horizon_h, model=model)
+        fc = run_live_forecast(
+            df, topo, calib, horizon_h=args.horizon_h, model=model, weather=weather
+        )
+        if weather is not None:
+            from hp_twin.adapters.weather_forecast import forecast_horizon_hours
+
+            print(
+                f"Wetterprognose: {args.weather} "
+                f"({forecast_horizon_hours(weather):.0f} h T_out/GHI), "
+                f"danach Fallback 'gestern wie heute'"
+            )
     out = {
         "n_events": len(fc.events),
         "expected_energy_kwh": round(float(fc.slots.energy_wh.sum()) / 1000, 2),
@@ -469,6 +489,12 @@ def main(argv: list[str] | None = None) -> int:
     fc.add_argument("--ttl-minutes", type=int, default=None)
     fc.add_argument(
         "--replay", action="store_true", help="Debug: Replay ab Datenanfang statt Live-Prognose"
+    )
+    fc.add_argument(
+        "--weather",
+        default=None,
+        metavar="ENTITY",
+        help="Weather-Entity für DWD-Prognose über HA (z. B. weather.duesseldorf)",
     )
     fc.add_argument("--out", default=None)
     fc.add_argument("--model", default="config/model.yaml")
