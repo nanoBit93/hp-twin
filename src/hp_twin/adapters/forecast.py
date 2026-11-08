@@ -6,6 +6,8 @@ Entladerate, Solargewinne und Gebäudemasse. Alle Parameter kommen aus ModelConf
 
 from __future__ import annotations
 
+import copy
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +20,7 @@ from hp_twin.adapters.replay import (
     build_replay,
     initial_controller_state,
 )
+from hp_twin.adapters.settings import RuntimeSettings
 from hp_twin.domain.calibration import CalibrationReport
 from hp_twin.domain.controller import ControllerState
 from hp_twin.domain.model_config import ModelConfig
@@ -29,6 +32,8 @@ from hp_twin.domain.montecarlo import (
 )
 from hp_twin.domain.topology import Topology
 
+log = logging.getLogger(__name__)
+
 
 @dataclass
 class ForecastResult:
@@ -37,6 +42,7 @@ class ForecastResult:
     eos: EosLoadProfile
     deterministic_p_el_w: np.ndarray
     time_s: np.ndarray
+    buffer_sim_c: np.ndarray | None = None  # det. Pufferverlauf (SG-Kandidaten)
 
     def to_dict(self) -> dict[str, Any]:
         s = self.slots
@@ -125,20 +131,85 @@ def run_forecast(
     )
 
 
+def fetch_live_weather(settings: RuntimeSettings, df: pd.DataFrame) -> pd.DataFrame | None:
+    """DWD-Vorhersage über Home Assistant abholen (Start = letzte Messung).
+
+    Liefert None, wenn keine Weather-Entity konfiguriert oder HA nicht erreichbar ist
+    (Prognose fällt in dem Fall auf den 24-h-Wiederholungs-Fallback zurück).
+    """
+    if not settings.weather_entity:
+        return None
+    from hp_twin.adapters.home_assistant import HaClient, HaError
+    from hp_twin.adapters.weather_forecast import fetch_weather_forecast
+
+    settings.apply_ha_env()
+    try:
+        client = HaClient.from_env(settings.env_path)
+        return fetch_weather_forecast(client, settings.weather_entity)
+    except HaError as e:
+        if settings.weather_required:
+            raise
+        log.warning(" Wetterprognose nicht verfügbar, Fallback 'gestern wie heute': %s", e)
+        return None
+
+
 def run_live_forecast(
     df: pd.DataFrame,
     topology: Topology,
     calib: CalibrationReport,
     horizon_h: float | None = None,
     model: ModelConfig | None = None,
+    weather: pd.DataFrame | None = None,
+    sg3_start_s: float | None = None,
+    sg3_end_s: float | None = None,
+    sg3_top_c: float | None = None,
 ) -> ForecastResult:
     """ECHTE Vorwärtsprognose ab dem letzten Messpunkt ("jetzt").
 
     Startzustand: letzte gemessene Speichertemperaturen + Reglerzustand (läuft/Pause seit ...).
-    Zukünftige Eingänge: letzte 24 h täglich wiederholt (siehe build_forecast_frame).
+    Zukünftige Eingänge: Wetter optional über einen Vorhersage-Frame (DWD via Home Assistant),
+    Rest (Soll-/Raumsollwerte, SG) letzte 24 h täglich wiederholt (siehe build_forecast_frame).
+
+    sg3_start_s/sg3_end_s/sg3_top_c: optionaler SG3-Sollverlauf ab Frame-Start (Rück-
+    Injection des EOS-Placements durch den SG-Orchestrator); None = Basis-Lauf ohne SG3.
     """
     model = model or ModelConfig()
     horizon_h = horizon_h if horizon_h is not None else model.sim.horizon_h
-    frame = build_forecast_frame(df, horizon_h)
+    frame = build_forecast_frame(df, horizon_h, weather=weather, strip_sg3=sg3_start_s is None)
+    if sg3_start_s is not None and sg3_end_s is not None:
+        frame = _inject_sg3_window(
+            frame, float(sg3_start_s), float(sg3_end_s), float(sg3_top_c or 46.0)
+        )
     cs = initial_controller_state(df, topology.controller.min_off_s)
-    return run_forecast(frame, topology, calib, 0, horizon_h=horizon_h, model=model, ctrl_state=cs)
+    result = run_forecast(
+        frame, topology, calib, 0, horizon_h=horizon_h, model=model, ctrl_state=cs
+    )
+    # Pufferverlauf für die SG-Kandidatenfindung mitliefern (det. Lauf)
+    from hp_twin.adapters.replay import build_replay
+
+    det = build_replay(
+        frame,
+        topology,
+        calib,
+        0,
+        horizon_h,
+        dhw_setpoint_cap_c=model.forecast.dhw_setpoint_cap_c,
+        model=model,
+        ctrl_state=copy.copy(cs),
+    )
+    result.buffer_sim_c = np.asarray(det.result.node_temps_c["buffer"], dtype=float)
+    return result
+
+
+def _inject_sg3_window(
+    frame: pd.DataFrame, start_s: float, end_s: float, top_c: float
+) -> pd.DataFrame:
+    """SG3-Sollverlauf am Placement in den Zukunftsframe injizieren (HK1-Soll)."""
+    from hp_twin.domain.sg_plan import inject_sg3_start
+
+    dt_s = float(frame.index.to_series().diff().dropna().iloc[0].total_seconds())
+    i0 = int(round(start_s / dt_s))
+    i1 = int(round(end_s / dt_s))
+    hk1 = frame["setpoint_hk1_c"].to_numpy(dtype=float)
+    frame["setpoint_hk1_c"] = inject_sg3_start(hk1, i0, i1, top_c)
+    return frame

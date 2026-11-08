@@ -6,8 +6,17 @@ import os
 from pathlib import Path
 
 
-def load_dotenv(path: str | Path = ".env") -> dict[str, str]:
-    """Liest KEY=VALUE-Zeilen, setzt sie in os.environ (ohne vorhandene zu überschreiben)."""
+def load_dotenv(
+    path: str | Path = ".env",
+    prefixes: tuple[str, ...] | None = None,
+) -> dict[str, str]:
+    """Liest KEY=VALUE-Zeilen; setzt hp-twin-relevante Keys in os.environ (setdefault).
+
+    `prefixes=None` setzt alle erfassten Keys; mit Prefix-Liste (z. B. ("HA_",)) lädt
+    der Aufrufer nur seine Namen — eine gemischte Dev-.env (HA-Zugang + Remote-API-
+    Token) vermischt sich sonst und das API-Token färbt unbeabsichtigt die lokale
+    API (security.api_token) bzw. umgekehrt.
+    """
     p = Path(path)
     values: dict[str, str] = {}
     if not p.exists():
@@ -17,7 +26,9 @@ def load_dotenv(path: str | Path = ".env") -> dict[str, str]:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip('"').strip("'")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
         values[key] = val
-        os.environ.setdefault(key, val)
+        if prefixes is None or key.startswith(prefixes):
+            os.environ.setdefault(key, val)
     return values

@@ -62,8 +62,15 @@
         <label>DHW-Cap °C<input id="dhw_setpoint_cap_c" type="number" value="45" /></label>
         <label>Export-Fenster (h)<input id="export_window_hours" type="number" value="6" /></label>
         <label>Intervall (min)<input id="schedule_interval_minutes" type="number" value="15" /></label>
+        <label>Weather-Entity (DWD)<input id="weather_entity" placeholder="weather.duesseldorf" /></label>
+        <label>SG3-Load-ID<input id="sg_load_id" value="sg3_req" /></label>
+        <label>Profil-Load-ID<input id="profile_load_id" value="hp_ext" /></label>
+        <label>SG3-PV-Schwelle (W)<input id="sg_min_pv_surplus_w" type="number" value="2500" /></label>
+        <label>Preisdach (€/kWh)<input id="sg_max_price_eur" type="number" step="0.01" placeholder="leer = nur PV" /></label>
         <label class="chk"><input id="auto_push_enabled" type="checkbox" /> Automatik aktiv</label>
         <label class="chk"><input id="export_before_push" type="checkbox" checked /> vor Push exportieren</label>
+        <label class="chk"><input id="sg_enabled" type="checkbox" /> SG3-Planung aktiv (EOS-Contingent)</label>
+        <label class="chk"><input id="sg_dry_run" type="checkbox" checked /> SG3 Dry-Run (ohne Push)</label>
       </div>
       <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
         <button id="save">Einstellungen speichern</button>
@@ -147,8 +154,12 @@
         kpi(d.calibration.buffer_threshold.start_offset_k + ' K', 'Start-Offset Puffer');
 
       const ss = f.start_state;
+      const wx = f.weather || {};
+      const sg = d.sg_plan || {};
       document.getElementById('fcNote').innerHTML = f.mode==='live'
-        ? `Prognose ab <b>jetzt</b>: Startzustand gemessen (${new Date(ss.last_measurement).toLocaleTimeString()}): Puffer ${ss.buffer_c} °C, DHW ${ss.dhw_c} °C. Zukünftige Eingänge (Außentemp., Strahlung, Sollwerte, SG) = <b>letzte 24 h wiederholt</b>.`
+        ? `Prognose ab <b>jetzt</b>: Startzustand gemessen (${new Date(ss.last_measurement).toLocaleTimeString()}): Puffer ${ss.buffer_c} °C, DHW ${ss.dhw_c} °C.`
+          + (wx.entity ? ` Wetter: <b>${wx.entity}</b> (${wx.horizon_h} h DWD), danach 24-h-Fallback.` : ' Wetter: <b>letzte 24 h wiederholt</b> (keine Weather-Entity gesetzt).')
+          + (sg && 'n_candidates' in sg ? ` SG3: ${sg.sg3_injected ? '<b class="ok">injiziert</b>' : 'aus'} (${sg.n_candidates} Kandidaten${sg.chosen ? `, gewählt ${Math.floor(sg.chosen.start_min/60)}:${String(Math.round(sg.chosen.start_min%60)).padStart(2,'0')} — ${sg.chosen.energy_wh.toFixed(0)} Wh` : ''}).` : '')
         : '<span class="bad">Replay-Modus (Debug): gemessenes Wetter, kein Live-Start</span>';
       // Forecast band
       Plotly.newPlot('chartForecast', [
@@ -204,26 +215,31 @@
     }
 
     // --- Settings & Automatik ---
-    const S_FIELDS = ['ha_base_url','eos_base_url','eos_managed_load_id','eos_ttl_minutes','forecast_runs','horizon_h','dhw_setpoint_cap_c','export_window_hours','schedule_interval_minutes'];
+    const S_FIELDS = ['ha_base_url','eos_base_url','eos_managed_load_id','eos_ttl_minutes','forecast_runs','horizon_h','dhw_setpoint_cap_c','export_window_hours','schedule_interval_minutes','weather_entity','sg_load_id','profile_load_id','sg_min_pv_surplus_w','sg_max_price_eur'];
     async function loadSettings() {
       try {
         const s = await (await fetch('api/settings')).json();
         S_FIELDS.forEach(k => { if (s[k] !== null && s[k] !== undefined) document.getElementById(k).value = s[k]; });
         document.getElementById('auto_push_enabled').checked = !!s.auto_push_enabled;
         document.getElementById('export_before_push').checked = !!s.export_before_push;
+        document.getElementById('sg_enabled').checked = !!s.sg_enabled;
+        document.getElementById('sg_dry_run').checked = s.sg_dry_run !== false;
         document.getElementById('eos_token').placeholder = s.eos_token_set ? '•••••• (gesetzt)' : '(leer)';
         document.getElementById('ha_token').placeholder = s.ha_token_set ? '•••••• (gesetzt)' : '(leer)';
       } catch(e) {}
     }
     function collectSettings() {
       const p = {};
-      S_FIELDS.forEach(k => { const v = document.getElementById(k).value; if (v !== '') p[k] = isNaN(v) ? v : parseFloat(v); });
+      S_FIELDS.forEach(k => { const el = document.getElementById(k); const v = el ? el.value : ''; if (v !== '') p[k] = isNaN(v) ? v : parseFloat(v); });
       p.ha_base_url = document.getElementById('ha_base_url').value;
       p.eos_base_url = document.getElementById('eos_base_url').value;
       p.eos_managed_load_id = document.getElementById('eos_managed_load_id').value;
       p.forecast_runs = parseInt(document.getElementById('forecast_runs').value || '100');
       p.auto_push_enabled = document.getElementById('auto_push_enabled').checked;
       p.export_before_push = document.getElementById('export_before_push').checked;
+      p.sg_enabled = document.getElementById('sg_enabled').checked;
+      p.sg_dry_run = document.getElementById('sg_dry_run').checked;
+      p.weather_entity = document.getElementById('weather_entity').value;
       const tok = document.getElementById('eos_token').value; if (tok) p.eos_token = tok;
       const htok = document.getElementById('ha_token').value; if (htok) p.ha_token = htok;
       return p;
