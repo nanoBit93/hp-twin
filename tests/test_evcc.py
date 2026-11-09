@@ -90,3 +90,20 @@ def test_price_at_outside_coverage_is_nan() -> None:
     )
     out = ms.price_at(idx)
     assert np.isfinite(out[:3]).all() and np.isnan(out[3:]).all()
+
+
+def test_price_at_uses_containing_slot_for_minute_aligned_forecast() -> None:
+    """Ein Messbeginn um 19:36 darf den Tarifslot 19:30 nicht verlieren."""
+    source_idx = pd.date_range("2026-11-08T19:30:00Z", periods=3, freq="15min", tz="UTC")
+    ms = MarketSeries(
+        index=source_idx,
+        solar_w=np.zeros(3),
+        price=np.array([0.30, 0.40, 0.50]),
+        feed_in=None,
+        battery_soc_kwh=None,
+        battery_max_power_w=None,
+    )
+    forecast_idx = pd.date_range("2026-11-08T19:36:00Z", periods=3, freq="15min", tz="UTC")
+
+    assert ms.price_at(forecast_idx).tolist() == pytest.approx([0.30, 0.40, 0.50])
+    assert np.isnan(ms.price_at(pd.DatetimeIndex([source_idx[-1] + pd.Timedelta(minutes=15)]))[0])

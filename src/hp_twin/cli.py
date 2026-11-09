@@ -106,8 +106,7 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         min_setpoint_c=DEFAULT_SG3_MIN_SETPOINT_C,
         target_tolerance_k=0.5,
     )
-    if sg3_thr.n_stops < 2:
-        sg3_thr = None
+    sg3_fit = sg3_thr if sg3_thr.n_stops >= 2 else None
     rooms = room_columns(df.reset_index())
     driver = df[rooms].mean(axis=1).to_numpy() - df["t_outdoor_c"].to_numpy()
     vol = next((n.volume_l for n in topo.storage.nodes if n.id == "buffer"), 300.0)
@@ -137,7 +136,7 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
             buffer_threshold=thr,
             discharge=dis,
             notes=notes,
-            sg3_buffer_threshold=sg3_thr,
+            sg3_buffer_threshold=sg3_fit,
         ),
     )
 

@@ -250,9 +250,7 @@ def simulate_sg3_run(
     if i0 >= len(p_final) or end_s <= start_s:
         raise ValueError("SG3 operation lies outside the forecast")
     diagnostics["start_buffer_c"] = (
-        float(df["t_hk1_c"].iloc[-1])
-        if i0 == 0
-        else float(basis_like.buffer_sim_c[i0])
+        float(df["t_hk1_c"].iloc[-1]) if i0 == 0 else float(basis_like.buffer_sim_c[i0])
     )
     i_end = min(len(p_final), int(np.ceil(end_s / dt_s)))
     completion_i: int | None = None
@@ -281,9 +279,7 @@ def simulate_sg3_run(
         (index for index in range(stop_i, len(modes)) if modes[index] in ("heat", "dhw")),
         None,
     )
-    diagnostics["next_normal_start_s"] = (
-        next_start_i * dt_s if next_start_i is not None else None
-    )
+    diagnostics["next_normal_start_s"] = next_start_i * dt_s if next_start_i is not None else None
     diagnostics["following_off_s"] = (
         (next_start_i - stop_i) * dt_s if next_start_i is not None else None
     )
@@ -317,6 +313,7 @@ def push_and_collect_placement(
     if not eos_base_url:
         notes.append("Keine EOS-Basis-URL -> Contingent nicht gepusht")
         return False, [], {}, notes
+    status: dict[str, Any] = {}
     if last_total_wh is not None and chosen.energy_wh > 0 and frame_start is not None:
         # The same physical run must not be re-offered on every poll; a different
         # forecast day, however, is a new offer even at exactly the same energy.
@@ -333,8 +330,11 @@ def push_and_collect_placement(
                 f"Hysterese: {chosen.energy_wh:.0f} Wh ≈ "
                 f"zuletzt {last_total_wh:.0f} Wh -> kein Push"
             )
-            return False, [], {}, notes
-    status: dict[str, Any] = {}
+            # Kein neues Angebot, aber das vorhandene Placement muss trotzdem
+            # adoptiert werden können. Sonst bleibt ein fertig geplanter Block
+            # für immer zwischen Push und Endprognose stehen.
+            status = read_load_status(eos_base_url, cfg.sg3_load_id, token=eos_token)
+            return False, planned_slots_from_status(status), status, notes
     if not cfg.dry_run:
         try:
             resp = push_contingent(
@@ -363,9 +363,10 @@ def push_and_collect_placement(
                 state.offered_total_wh = chosen.energy_wh
                 state.offered_duration_s = chosen.runtime_s
                 state.offered_setpoint_end_s = chosen.setpoint_end_s
-                state.offered_frame_start_iso = frame_start.isoformat()
+                offer_start = frame_start or pd.Timestamp("1970-01-01T00:00:00Z")
+                state.offered_frame_start_iso = offer_start.isoformat()
                 state.offered_setpoint_end_iso = (
-                    frame_start + pd.Timedelta(seconds=chosen.setpoint_end_s)
+                    offer_start + pd.Timedelta(seconds=chosen.setpoint_end_s)
                 ).isoformat()
                 state.pending = True
         except RuntimeError as e:
@@ -478,9 +479,9 @@ def _adopt_placement(
     res.placement_slots = planned_slots_from_status(status)
     res.final_p_el_w = np.asarray(final.deterministic_p_el_w, dtype=float).copy()
     if hasattr(final, "eos") and final.eos.thermal is not None:
-        final.eos.thermal.update({
-            "plan": plan_signature(status, frame_start, cfg.sg3_load_id) or {}
-        })
+        final.eos.thermal.update(
+            {"plan": plan_signature(status, frame_start, cfg.sg3_load_id) or {}}
+        )
     res.sg3_injected = True
     res.notes.append("Ununterbrochener SG3-Block mit nachgewiesenem Zielabschluss injiziert")
     state.pending = False
@@ -572,11 +573,12 @@ def run_sg_cycle(
             res.eos_status = _public_status(status)
             # EOS intentionally keeps pushed data in memory. After its restart
             # there is no live offer to wait for; create a fresh candidate rather
-            # than retaining pending forever. An expired push is equally stale.
+            # than retaining pending forever. Expiry prevents *new* placements,
+            # but must not discard a block EOS already returned to this twin.
             if (
                 not status.get("pushed", True)
                 or not planned_slots_from_status(status)
-                or status.get("reason") in ("nothing pushed yet", "pushed data expired")
+                or status.get("reason") == "nothing pushed yet"
             ):
                 state.pending = False
                 state.offered_total_wh = None
@@ -788,7 +790,7 @@ def run_sg_cycle(
     res.placement_slots = slots
     res.eos_status = _public_status(status)
     res.notes.extend(notes)
-    if not pushed:
+    if not pushed and not slots:
         return basis, res
     final = _adopt_placement(
         df=df,

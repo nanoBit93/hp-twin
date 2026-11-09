@@ -71,7 +71,7 @@ def thermal_sidecar(
     dt_s = float(np.diff(times)[0]) if len(times) > 1 else 60.0
     origin_s = float(times[0])
     n_slots = int(np.ceil((times[-1] + dt_s - origin_s) / slot_s))
-    result: dict[str, list[float | None] | list[str]] = {
+    result: dict[str, Any] = {
         "buffer_c": [],
         "dhw_c": [],
         "outdoor_c": [],
@@ -84,14 +84,14 @@ def thermal_sidecar(
             segment = values[lo:hi]
             finite = segment[np.isfinite(segment)]
             result[name].append(round(float(np.mean(finite)), 3) if len(finite) else None)
-        segment = modes[lo:hi]
+        mode_segment = modes[lo:hi]
         # Temperatures and electrical load both respond to a partial first slot.
         # A majority-idle vote would hide precisely that real compressor start.
-        operating = next((mode for mode in segment if mode in ("dhw", "heat")), None)
+        operating = next((mode for mode in mode_segment if mode in ("dhw", "heat")), None)
         if operating is not None:
             result["mode"].append(operating)
         else:
-            counts = pd.Series(segment).value_counts()
+            counts = pd.Series(mode_segment).value_counts()
             result["mode"].append(str(counts.index[0]) if len(counts) else "unknown")
     return {
         "start": pd.Timestamp(start).isoformat(),
@@ -100,7 +100,8 @@ def thermal_sidecar(
         "plan": plan or {},
         "run_probability": (
             [round(float(value), 4) for value in np.asarray(run_probability, dtype=float)]
-            if run_probability is not None else None
+            if run_probability is not None
+            else None
         ),
         "running_threshold_w": running_threshold_w,
     }
@@ -114,10 +115,12 @@ def plan_signature(
     if not windows:
         return None
     start, end = windows[0]
-    slot0 = int(round(
-        (pd.Timestamp(frame_start) - pd.Timestamp(status["plan_anchor"])).total_seconds()
-        / 900.0
-    ))
+    slot0 = int(
+        round(
+            (pd.Timestamp(frame_start) - pd.Timestamp(status["plan_anchor"])).total_seconds()
+            / 900.0
+        )
+    )
     slots = [int(round(start / 900.0)) + slot0, int(round(end / 900.0)) + slot0]
     return {
         "signature": f"{status['plan_anchor']}|{slots[0]}-{slots[1]}",
@@ -293,6 +296,7 @@ def planned_windows_from_status(
 
     The anchor is part of the EOS response. Without it a plan index cannot safely be
     interpreted as a future timestamp; refusing is safer than injecting yesterday.
+    A forecast that begins inside an EOS slot owns that slot from its boundary.
     """
     if status.get("fallback_active"):
         raise ValueError("EOS placement belongs to the fallback planner")
@@ -304,10 +308,7 @@ def planned_windows_from_status(
     start = pd.Timestamp(frame_start)
     if start.tzinfo is None:
         start = start.tz_localize("UTC")
-    slot0_s = (start - anchor).total_seconds() / 900.0
-    if abs(slot0_s - round(slot0_s)) > 1e-6:
-        raise ValueError("forecast start is not aligned with the EOS quarter-hour grid")
-    slot0 = int(round(slot0_s))
+    slot0 = int(np.floor((start - anchor).total_seconds() / 900.0))
     windows: list[tuple[float, float]] = []
     active_start: int | None = None
     previous: int | None = None

@@ -251,6 +251,19 @@ def test_multiple_placement_blocks_use_midnight_anchor():
     ) == [(0.0, 1800.0), (2700.0, 3600.0)]
 
 
+def test_minute_aligned_forecast_uses_containing_eos_slot():
+    """A forecast beginning at 19:36 owns EOS slot 19:30, not slot 19:45."""
+    status = {
+        "plan_anchor": "2026-01-13T00:00:00+00:00",
+        "time_frame_base": 900,
+        "fallback_active": False,
+        "plan": [0.0] * 80 + [400.0, 400.0] + [0.0] * 110,
+    }
+    assert planned_windows_from_status(
+        status, pd.Timestamp("2026-01-13T19:36:00Z"), 48 * 3600.0
+    ) == [(1800.0, 3600.0)]
+
+
 def test_placement_without_anchor_is_refused():
     with pytest.raises(ValueError, match="plan_anchor"):
         planned_windows_from_status(

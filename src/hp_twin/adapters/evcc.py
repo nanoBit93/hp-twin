@@ -50,8 +50,14 @@ class MarketSeries:
         self._battery_power = battery_max_power_w
 
     def price_at(self, dt_index: pd.DatetimeIndex) -> np.ndarray:
-        """Preise für beliebige 15-min-Zeitpunkte; außerhalb der Tarifdeckung = NaN."""
-        return pd.Series(self._price, index=self.index).reindex(dt_index).to_numpy(dtype=float)
+        """Preise für beliebige Zeitpunkte; außerhalb der Tarifdeckung = NaN.
+
+        Die Simulation beginnt eine Minute nach dem letzten Messpunkt, also nicht
+        zwingend auf einer Viertelstunde. Der Preis gehört zum bereits laufenden
+        15-min-Slot; exaktes Reindex würde sonst alle Tarife verlieren.
+        """
+        slot_index = pd.DatetimeIndex(dt_index).floor("15min")
+        return pd.Series(self._price, index=self.index).reindex(slot_index).to_numpy(dtype=float)
 
     @property
     def solar_surplus_w(self) -> list[float]:

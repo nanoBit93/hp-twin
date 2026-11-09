@@ -118,7 +118,12 @@ nach Adoption zurückgezogen. So ist die SG3-Energie nur einmal im System.
 - **Horizont:** 48 h, 15-min-Slots. Die Wirtschaftlichkeit wird nur für vollständig bepreiste
   EOS-Slots bewertet. Fehlen Preise am Horizontende, wird diese Energie nicht geschätzt oder
   verworfen; die Preisabdeckung steht in den SG3-Notizen. Ganz ohne bepreiste Energie bleibt
-  die SG2-Prognose aktiv (Degraded statt blindes SG3).
+  die SG2-Prognose aktiv (Degraded statt blindes SG3). Beginnt die Simulation innerhalb eines
+  Viertelstunden-Slots, verwendet sie den Preis dieses bereits laufenden Slots; der tatsächliche
+  Messbeginn muss nicht auf :00/:15/:30/:45 liegen. Dasselbe Slot-Mapping gilt beim Zurücklesen
+  des EOS-Placements und bei einer offenen Adoption nach Ablauf der Push-TTL: Die TTL verhindert
+  nur neue Platzierungen, nicht die Übernahme eines bereits geplanten Blocks. Die Hysterese
+  verhindert ebenfalls nur einen erneuten Push, nicht das Lesen und Adoptieren dieses Plans.
 - **Feasibility:** erlaubte Startslots, keine bloße Temperaturschwelle. Berücksichtigt werden laufende
   Basisladung, aktuelle und prognostizierte `min_off`-Sperren, `min_on`, Horizontende, COP und die
   konfigurierbare Bivalenz-Außentemperatur `sg_bivalence_outdoor_c` (Default 0 °C). Eine aktuell

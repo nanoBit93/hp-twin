@@ -16,6 +16,8 @@ import pandas as pd
 
 from hp_twin.adapters.settings import RuntimeSettings
 
+_SG3_STATES: dict[tuple[str, str], Any] = {}
+
 
 @dataclass
 class ServiceStatus:
@@ -169,12 +171,8 @@ def run_cycle(
         if sg_cfg.enabled:
             from hp_twin.adapters.sg_orchestrator import run_sg_cycle
 
-            if not hasattr(run_cycle, "_sg3_state"):
-                run_cycle._sg3_state = {}
             state_key = (settings.eos_base_url, sg_cfg.sg3_load_id)
-            sg_state = run_cycle._sg3_state.setdefault(
-                state_key, Sg3CycleState()
-            )
+            sg_state = _SG3_STATES.setdefault(state_key, Sg3CycleState())
             fc, sg_res = run_sg_cycle(
                 df,
                 topo,
@@ -190,8 +188,7 @@ def run_cycle(
             )
             st.sg_plan = sg_res.to_dict()
         else:
-            if hasattr(run_cycle, "_sg3_state"):
-                run_cycle._sg3_state.clear()
+            _SG3_STATES.clear()
             fc = run_live_forecast(
                 df, topo, calib, horizon_h=settings.horizon_h, model=model, weather=weather
             )

@@ -40,13 +40,15 @@ class FakeForecastResult:
         self.heat_pump = HeatPumpAirWater()
         self.dhw_sim_c = np.full(n, 45.0)
         self.frame_start = pd.Timestamp("2026-01-13T00:00:00Z")
-        self.eos = SimpleNamespace(thermal={
-            "start": self.frame_start.isoformat(),
-            "resolution": "15min",
-            "series": {},
-            "plan": {},
-            "run_probability": [0.0, 0.2, 1.0],
-        })
+        self.eos = SimpleNamespace(
+            thermal={
+                "start": self.frame_start.isoformat(),
+                "resolution": "15min",
+                "series": {},
+                "plan": {},
+                "run_probability": [0.0, 0.2, 1.0],
+            }
+        )
 
 
 class _Event:
@@ -198,16 +200,81 @@ def test_push_hysteresis_skips_second_push(monkey_eos: FakeEos) -> None:
     cfg = SgPlanConfig(enabled=True, dry_run=False)
     state = Sg3CycleState()
     push_and_collect_placement(
-        cand, cfg, "http://eos:8080", None, last_total_wh=None,
-        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"), state=state,
+        cand,
+        cfg,
+        "http://eos:8080",
+        None,
+        last_total_wh=None,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        state=state,
     )
     pushed2, _, _, notes = push_and_collect_placement(
-        cand, cfg, "http://eos:8080", None, last_total_wh=6400.0,
-        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"), state=state,
+        cand,
+        cfg,
+        "http://eos:8080",
+        None,
+        last_total_wh=6400.0,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        state=state,
     )
     assert not pushed2
     assert any("Hysterese" in n for n in notes)
     assert len(monkey_eos.pushed) == 1
+
+
+def test_hysteresis_still_reads_existing_placement(monkey_eos: FakeEos) -> None:
+    from hp_twin.domain.sg_plan import SgCandidate
+
+    cand = SgCandidate(0.0, 7200.0, 6500.0, 4200.0, "unchanged offer")
+    cfg = SgPlanConfig(enabled=True, dry_run=False)
+    state = Sg3CycleState(offered_frame_start_iso="2026-01-13T00:00:00+00:00")
+    pushed, slots, status, notes = push_and_collect_placement(
+        cand,
+        cfg,
+        "http://eos:8080",
+        None,
+        last_total_wh=6400.0,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        state=state,
+    )
+
+    assert not pushed
+    assert slots
+    assert status["planned_wh"] > 0, (pushed, slots, status, notes)
+    assert not monkey_eos.pushed
+
+
+def test_unchanged_offer_adopts_placement_without_another_push(
+    monkey_eos: FakeEos,
+) -> None:
+    """Hysterese verhindert nur den Push, nicht die Adoption des fertigen Plans."""
+    from hp_twin.adapters.evcc import MarketSeries
+    from hp_twin.adapters.sg_orchestrator import run_sg_cycle
+
+    idx = pd.date_range("2026-01-13T00:00:00Z", periods=192, freq="15min", tz="UTC")
+    market = MarketSeries(idx, np.zeros(192), np.full(192, 0.3), None, None, None)
+    state = Sg3CycleState(
+        pending=True,
+        offered_total_wh=800.0,
+        offered_duration_s=3600.0,
+        offered_frame_start_iso="2026-01-13T00:00:00+00:00",
+    )
+    _, res = run_sg_cycle(
+        _df(),
+        _topo(),
+        _calib(),
+        _model(),
+        FakeForecastFn(),
+        market=market,
+        cfg=SgPlanConfig(enabled=True, dry_run=False, windows_utc_h=[(0, 24)]),
+        eos_base_url="http://eos",
+        state=state,
+    )
+
+    assert res.sg3_injected, res.notes
+    assert res.contingency_withdrawn
+    assert not res.contingency_pushed
+    assert all(contingent.total_wh == 0.0 for contingent in monkey_eos.pushed)
 
 
 def test_push_dry_run_never_pushes(monkey_eos: FakeEos) -> None:
@@ -232,8 +299,15 @@ def test_run_sg_cycle_full_flow(monkey_eos: FakeEos) -> None:
     market = _market(solar)
     state = Sg3CycleState()
     final, res = run_sg_cycle(
-        df, _topo(), _calib(), _model(), fn, market=market, cfg=cfg,
-        eos_base_url="http://eos:8080", state=state,
+        df,
+        _topo(),
+        _calib(),
+        _model(),
+        fn,
+        market=market,
+        cfg=cfg,
+        eos_base_url="http://eos:8080",
+        state=state,
     )
     # Contingent gepusht, Placement gelesen, Endprognose mit Injektion gerufen
     assert len(monkey_eos.pushed) == 2, {
@@ -259,8 +333,15 @@ def test_run_sg_cycle_full_flow(monkey_eos: FakeEos) -> None:
     assert monkey_eos.pushed[-1].total_wh == 0.0
 
     _, next_result = run_sg_cycle(
-        df, _topo(), _calib(), _model(), fn, market=market, cfg=cfg,
-        eos_base_url="http://eos:8080", state=state,
+        df,
+        _topo(),
+        _calib(),
+        _model(),
+        fn,
+        market=market,
+        cfg=cfg,
+        eos_base_url="http://eos:8080",
+        state=state,
     )
     assert monkey_eos.pushed[-1].total_wh == 0.0
     assert not next_result.contingency_withdrawn, next_result.notes
@@ -340,11 +421,18 @@ def test_placement_must_match_the_simulated_runtime_exactly() -> None:
     res = SgPlanResult()
     state = Sg3CycleState(pending=True)
     final = _adopt_placement(
-        df=_df(), topology=_topo(), calib=_calib(), model=_model(),
-        forecast_fn=FakeForecastFn(), weather=None,
+        df=_df(),
+        topology=_topo(),
+        calib=_calib(),
+        model=_model(),
+        forecast_fn=FakeForecastFn(),
+        weather=None,
         chosen=SgCandidate(0.0, 1800.0, 800.0, 3600.0, "previous offer"),
-        cfg=SgPlanConfig(), status=status,
-        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"), res=res, state=state,
+        cfg=SgPlanConfig(),
+        status=status,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        res=res,
+        state=state,
     )
     assert final is None
     assert not res.sg3_injected
@@ -362,16 +450,27 @@ def test_pending_offer_preserves_the_simulated_setpoint_deadline() -> None:
         "plan": [400.0, 400.0] + [0.0] * 190,
     }
     chosen = SgCandidate(
-        0.0, 1800.0, 800.0, 3600.0, "previous offer",
+        0.0,
+        1800.0,
+        800.0,
+        3600.0,
+        "previous offer",
         thermal={"setpoint_end_s": 7200.0},
     )
     res = SgPlanResult()
     final = _adopt_placement(
-        df=_df(), topology=_topo(), calib=_calib(), model=_model(),
-        forecast_fn=FakeForecastFn(), weather=None,
-        chosen=chosen, cfg=SgPlanConfig(), status=status,
+        df=_df(),
+        topology=_topo(),
+        calib=_calib(),
+        model=_model(),
+        forecast_fn=FakeForecastFn(),
+        weather=None,
+        chosen=chosen,
+        cfg=SgPlanConfig(),
+        status=status,
         frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
-        res=res, state=Sg3CycleState(pending=True),
+        res=res,
+        state=Sg3CycleState(pending=True),
     )
     assert final is not None
     assert not res.placement_rejected
@@ -390,10 +489,18 @@ def test_adopted_shifted_run_must_reach_its_thermal_target() -> None:
     state = Sg3CycleState(pending=True)
     chosen = SgCandidate(0.0, 1800.0, 800.0, 3600.0, "previous offer", thermal={})
     final = _adopt_placement(
-        df=_df(), topology=_topo(), calib=_calib(), model=_model(),
-        forecast_fn=FakeForecastFn(), weather=None,
-        chosen=chosen, cfg=SgPlanConfig(), status=status,
-        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"), res=res, state=state,
+        df=_df(),
+        topology=_topo(),
+        calib=_calib(),
+        model=_model(),
+        forecast_fn=FakeForecastFn(),
+        weather=None,
+        chosen=chosen,
+        cfg=SgPlanConfig(),
+        status=status,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        res=res,
+        state=state,
     )
     assert final is not None, res.notes
     assert chosen.thermal["adopted_start_s"] == 0.0
@@ -421,11 +528,18 @@ def test_failed_withdrawal_does_not_publish_the_final_profile(
     state = Sg3CycleState(pending=True)
     res = SgPlanResult()
     final = _adopt_placement(
-        df=_df(), topology=_topo(), calib=_calib(), model=_model(),
-        forecast_fn=FakeForecastFn(), weather=None,
+        df=_df(),
+        topology=_topo(),
+        calib=_calib(),
+        model=_model(),
+        forecast_fn=FakeForecastFn(),
+        weather=None,
         chosen=SgCandidate(0.0, 1800.0, 800.0, 3600.0, "offer", thermal={}),
-        cfg=SgPlanConfig(), status=status,
-        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"), res=res, state=state,
+        cfg=SgPlanConfig(),
+        status=status,
+        frame_start=pd.Timestamp("2026-01-13T00:00:00Z"),
+        res=res,
+        state=state,
         eos_base_url="http://eos:8080",
     )
     assert final is None
@@ -455,12 +569,87 @@ def test_pending_zero_plan_is_replanned_after_eos_restart(
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("stop after replanning")),
     )
     _, res = run_sg_cycle(
-        _df(), _topo(), _calib(), _model(), FakeForecastFn(), market=market,
+        _df(),
+        _topo(),
+        _calib(),
+        _model(),
+        FakeForecastFn(),
+        market=market,
         cfg=SgPlanConfig(enabled=True, dry_run=False, windows_utc_h=[(0, 24)]),
-        eos_base_url="http://eos", state=Sg3CycleState(pending=True, offered_total_wh=800.0),
+        eos_base_url="http://eos",
+        state=Sg3CycleState(pending=True, offered_total_wh=800.0),
     )
     assert res.candidates
     assert any("neu geplant" in note for note in res.notes)
+
+
+def test_pending_offer_keeps_reading_placement_when_candidate_is_unchanged(
+    monkey_eos: FakeEos,
+) -> None:
+    """Die Energie-Hysterese darf ein ausstehendes Placement nicht verstecken."""
+    from hp_twin.adapters.evcc import MarketSeries
+    from hp_twin.adapters.sg_orchestrator import run_sg_cycle
+
+    idx = pd.date_range("2026-01-13T00:00:00Z", periods=192, freq="15min", tz="UTC")
+    market = MarketSeries(idx, np.zeros(192), np.full(192, 0.3), None, None, None)
+    state = Sg3CycleState(
+        pending=True,
+        offered_total_wh=800.0,
+        offered_duration_s=3600.0,
+        offered_frame_start_iso="2026-01-13T00:00:00+00:00",
+    )
+    _, res = run_sg_cycle(
+        _df(),
+        _topo(),
+        _calib(),
+        _model(),
+        FakeForecastFn(),
+        market=market,
+        cfg=SgPlanConfig(enabled=True, dry_run=False),
+        eos_base_url="http://eos",
+        state=state,
+    )
+
+    assert res.sg3_injected
+    assert res.contingency_withdrawn
+    assert not any("Hysterese" in note for note in res.notes)
+
+
+def test_pending_expired_offer_still_adopts_existing_eos_placement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Die Push-TTL blockiert neue Platzierungen, nicht eine bereits fertige."""
+    from hp_twin.adapters.sg_orchestrator import run_sg_cycle
+
+    monkeypatch.setattr(
+        "hp_twin.adapters.sg_orchestrator.read_load_status",
+        lambda *args, **kwargs: {
+            "plan": [400.0, 400.0] + [0.0] * 190,
+            "plan_anchor": "2026-01-13T00:00:00+00:00",
+            "time_frame_base": 900,
+            "reason": "pushed data expired",
+            "fallback_active": False,
+        },
+    )
+    monkeypatch.setattr(
+        "hp_twin.adapters.sg_orchestrator.withdraw_contingent",
+        lambda *args, **kwargs: {"accepted": True},
+    )
+    _, res = run_sg_cycle(
+        _df(),
+        _topo(),
+        _calib(),
+        _model(),
+        FakeForecastFn(),
+        cfg=SgPlanConfig(enabled=True, dry_run=False),
+        eos_base_url="http://eos",
+        state=Sg3CycleState(pending=True, offered_total_wh=800.0, offered_duration_s=1800.0),
+    )
+
+    assert res.placement_slots == [(0, 400.0), (1, 400.0)]
+    assert res.sg3_injected, res.notes
+    assert res.contingency_withdrawn
+    assert not any("neu geplant" in note for note in res.notes)
 
 
 def test_sg3_offer_uses_window_delta_not_later_displaced_runs() -> None:
