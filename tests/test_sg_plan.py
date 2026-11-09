@@ -7,7 +7,6 @@ import pytest
 
 from hp_twin.domain.sg_plan import (
     blocks,
-    evaluate_candidate,
     inject_sg3_start,
     sg3_candidates,
     sg3_mask,
@@ -113,10 +112,8 @@ def test_sg3_candidates_basic_window() -> None:
     dt = 60.0
     running = np.zeros(n)
     t_buf = np.full(n, 28.0)
-    sp_buf = np.full(n, 31.0)
     cands = sg3_candidates(
         t_buf,
-        sp_buf,
         buffer_overshoot_k=7.0,
         running_w=running,
         running_threshold_w=200.0,
@@ -131,7 +128,6 @@ def test_sg3_candidates_basic_window() -> None:
     # Innerhalb: Fenster 10-50 min und Puffer weit unter Top -> ein Kandidat-Abschnitt
     cands2 = sg3_candidates(
         t_buf,
-        sp_buf,
         buffer_overshoot_k=7.0,
         running_w=running,
         running_threshold_w=200.0,
@@ -152,7 +148,6 @@ def test_sg3_candidates_respects_min_off_lock() -> None:
     t_buf = np.full(n, 28.0)
     cands = sg3_candidates(
         t_buf,
-        np.full(n, 31.0),
         buffer_overshoot_k=7.0,
         running_w=running,
         running_threshold_w=200.0,
@@ -168,34 +163,18 @@ def test_sg3_candidates_respects_min_off_lock() -> None:
     assert all(lo >= 70 * 60.0 for lo, _ in cands if lo > 0)
 
 
-def test_evaluate_candidate_pv_threshold() -> None:
-    slot = 900.0
-    solar = np.full(16, 100.0)
-    solar[2] = 2600.0  # Spitze im Fenster 0..4
-    c = evaluate_candidate(0.0, 4 * slot, 6500.0, 4200.0, slot, solar, min_pv_surplus_w=2500.0)
-    assert c is not None and "pv_surplus" in c.reason and c.deadline_hours() == 1.0
-
-
-def test_evaluate_candidate_below_threshold_is_none() -> None:
-    slot = 900.0
-    solar = np.full(8, 500.0)
-    price = np.full(8, 0.45)
-    c = evaluate_candidate(
-        0.0, 7200.0, 6500.0, 4200.0, slot, solar, 2500.0, price, max_price_eur=0.30
+def test_sg3_candidate_region_is_not_split_into_short_chunks() -> None:
+    """The thermal model, not candidate chunking, owns the actual run duration."""
+    n = 240
+    cands = sg3_candidates(
+        np.full(n, 28.0),
+        buffer_overshoot_k=7.0,
+        running_w=np.zeros(n),
+        running_threshold_w=200.0,
+        min_off_s=1800.0,
+        dt_s=60.0,
+        allowed_start_s=0.0,
+        allowed_end_s=n * 60.0,
+        sg3_top_c=49.8,
     )
-    assert c is None  # weder PV noch Preis erfüllt
-
-
-def test_evaluate_candidate_price_fallback() -> None:
-    slot = 900.0
-    solar = np.full(4, 100.0)
-    price = np.array([0.42, 0.11, 0.12, 0.13])
-    c = evaluate_candidate(
-        0.0, 3600.0, 6500.0, 4200.0, slot, solar, 2500.0, price, max_price_eur=0.30
-    )
-    assert c is not None and "price" in c.reason
-
-
-def test_evaluate_candidate_without_market_signal_is_none() -> None:
-    c = evaluate_candidate(0.0, 3600.0, 6500.0, 4200.0, 900.0, None, 2500.0)
-    assert c is None  # kein blindes SG3 ohne Markt-Signal
+    assert cands == [(0.0, 4 * 3600.0)]

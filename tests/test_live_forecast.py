@@ -58,6 +58,150 @@ def test_forecast_frame_strips_sg3_by_default() -> None:
     )
 
 
+def test_eos_thermal_sidecar_uses_the_same_final_forecast() -> None:
+    from hp_twin.adapters.forecast import run_live_forecast
+    from hp_twin.adapters.io_yaml import load_topology
+    from hp_twin.domain.calibration import (
+        CalibrationReport,
+        DischargeFit,
+        HeatPumpFit,
+        ThresholdEstimate,
+    )
+    from hp_twin.domain.heat_source import HeatPumpAirWater
+    from hp_twin.domain.model_config import ModelConfig
+
+    df = _df()
+    calib = CalibrationReport(
+        heat_pump=HeatPumpFit(HeatPumpAirWater(), 1, 0.0, 0.0, 0.0, 0.0, 3.0),
+        buffer_threshold=ThresholdEstimate("buffer", 1, 1, -5.0, 2.0),
+        discharge=DischargeFit(100.0, 0.0, 0.0, 1, 1.0),
+    )
+    model = ModelConfig()
+    model.montecarlo.n_runs = 0
+    result = run_live_forecast(
+        df, load_topology("config/example_topology.yaml"), calib, model=model
+    )
+    payload = result.eos.to_payload()
+    thermal = payload["thermal"]
+    assert thermal["start"] == result.frame_start.isoformat()
+    assert thermal["resolution"] == "15min"
+    assert thermal["series"]["buffer_c"][0] == pytest.approx(
+        float(np.mean(result.buffer_sim_c[:3]))
+    )
+    assert thermal["series"]["dhw_c"][0] == pytest.approx(
+        float(np.mean(result.dhw_sim_c[:3])), abs=0.002
+    )
+    assert thermal["series"]["mode"][0] in ("idle", "heat", "dhw", "pause")
+    assert len(thermal["series"]["buffer_c"]) == len(payload["values"])
+
+
+def test_adopted_thermal_payload_carries_the_actual_eos_plan() -> None:
+    from hp_twin.adapters.eos_connect import plan_signature
+
+    status = {
+        "plan_anchor": "2026-01-13T00:00:00+00:00",
+        "time_frame_base": 900,
+        "fallback_active": False,
+        "plan": [0.0] * 8 + [400.0, 400.0] + [0.0] * 182,
+    }
+    plan = plan_signature(status, pd.Timestamp("2026-01-13T00:00:00Z"))
+    assert plan["signature"] == "2026-01-13T00:00:00+00:00|8-10"
+    assert plan["start_s"] == 7200.0
+    assert plan["end_s"] == 9000.0
+    assert plan["contingent_id"] == "sg3_req"
+
+
+def test_adopted_plan_signature_keeps_midnight_slot_indices() -> None:
+    from hp_twin.adapters.eos_connect import plan_signature
+
+    status = {
+        "plan_anchor": "2026-01-13T00:00:00+00:00",
+        "time_frame_base": 900,
+        "fallback_active": False,
+        "plan": [0.0] * 20 + [400.0, 400.0] + [0.0] * 170,
+    }
+    plan = plan_signature(status, pd.Timestamp("2026-01-13T02:00:00Z"))
+    assert plan["signature"] == "2026-01-13T00:00:00+00:00|20-22"
+    assert plan["start_s"] == 10800.0
+    assert plan["end_s"] == 12600.0
+
+
+def test_partial_first_heating_slot_is_visible_in_thermal_mode() -> None:
+    from hp_twin.adapters.eos_connect import thermal_sidecar
+
+    times = np.arange(60) * 60.0
+    buffer = np.full(60, 28.0)
+    buffer[12:] += np.arange(48) * 0.1
+    mode = ["idle"] * 12 + ["heat"] * 48
+    result = thermal_sidecar(
+        buffer_c=buffer,
+        dhw_c=np.full(60, 45.0),
+        outdoor_c=np.full(60, 8.0),
+        mode=mode,
+        time_s=times,
+        start=pd.Timestamp("2026-01-13T00:03:00Z"),
+    )
+    assert result["series"]["buffer_c"][1] > result["series"]["buffer_c"][0]
+    assert result["series"]["mode"][1] == "heat"
+    # Three minutes of real operation at the end of the previous slot count too.
+    assert result["series"]["mode"][0] == "heat"
+
+
+def test_thermal_operating_band_uses_the_electrical_slot_occupancy() -> None:
+    from hp_twin.adapters.eos_connect import thermal_sidecar
+
+    times = np.arange(60) * 60.0
+    result = thermal_sidecar(
+        buffer_c=np.full(60, 30.0),
+        dhw_c=np.full(60, 45.0),
+        outdoor_c=np.full(60, 8.0),
+        mode=["idle"] * 60,
+        run_probability=[0.0, 1 / 15, 1.0, 0.0],
+        running_threshold_w=200.0,
+        time_s=times,
+        start=pd.Timestamp("2026-01-13T00:03:00Z"),
+    )
+    # Less than one simulation step in a slot is still visible through the
+    # electrical profile's run probability; the band cannot start one slot late.
+    assert result["run_probability"][1] > 0
+    assert result["run_probability"][0] == 0.0
+    assert result["running_threshold_w"] == 200.0
+
+
+def test_thermal_occupancy_follows_the_same_reference_run_as_temperature() -> None:
+    from hp_twin.adapters.forecast import run_live_forecast
+    from hp_twin.adapters.io_yaml import load_topology
+    from hp_twin.domain.calibration import (
+        CalibrationReport,
+        DischargeFit,
+        HeatPumpFit,
+        ThresholdEstimate,
+    )
+    from hp_twin.domain.heat_source import HeatPumpAirWater
+    from hp_twin.domain.model_config import ModelConfig
+    from hp_twin.domain.montecarlo import aggregate_slots
+
+    model = ModelConfig()
+    model.montecarlo.n_runs = 3
+    calib = CalibrationReport(
+        heat_pump=HeatPumpFit(HeatPumpAirWater(), 1, 0.0, 0.0, 0.0, 0.0, 3.0),
+        buffer_threshold=ThresholdEstimate("buffer", 1, 1, -5.0, 2.0),
+        discharge=DischargeFit(100.0, 0.0, 0.0, 1, 1.0),
+    )
+    result = run_live_forecast(
+        _df(), load_topology("config/example_topology.yaml"), calib, model=model
+    )
+    reference = aggregate_slots(
+        result.time_s,
+        [result.deterministic_p_el_w],
+        slot_s=model.forecast.slot_s,
+        running_threshold_w=model.forecast.running_threshold_w,
+    )
+    assert np.allclose(
+        result.eos.thermal["run_probability"], reference.run_probability, atol=0.0001
+    )
+
+
 def test_forecast_needs_24h() -> None:
     df = _df().iloc[:100]
     try:

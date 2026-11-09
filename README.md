@@ -70,6 +70,8 @@ Im Dashboard unter **„⚙️ Automatik & EOS-Connect-Verbindung"** einstellbar
 - **Kalibrierung**: Bei < `min_fit_days` (Default 5) Historie wird die mitgelieferte/gespeicherte
   Kalibrierung benutzt (Bundle-Import) statt aus wenigen Stunden zu fitten.
 - Endpunkte: `GET/POST /api/settings`, `POST /api/push_now` (startet im Hintergrund; `{"push":false}` = Dry-Run), `GET /api/status`.
+Kommt ein weiterer Refresh während eines laufenden Zyklus an, wird genau ein Folgezyklus mit den
+neuesten Einstellungen nachgeholt, statt die Anforderung zu verwerfen.
 
 ## Analyse-/Dev-API (Fernanschluss für die Entwicklung)
 Die laufende Instanz (HA Add-on) ist über die **Analyse-API** von der Entwickler-Maschine aus
@@ -104,6 +106,96 @@ Kalibrierung sofort (statt erst aus Messdaten zu fitten). Endpunkte: `GET/POST /
 - Push: REST `POST <eos>/api/managed_loads/<id>/push` (`hp-twin push ...`) **oder** MQTT retained
   auf `eos_connect/managed_load/<id>/set` (Topic via `hp_twin.adapters.eos_connect.mqtt_topic`).
 - DHW: neue Konfig (SG3-Soll = Tagestemperatur) → DHW passiv über HK1; `--dhw-cap 45`.
+
+### SG3-Flexibilitätszyklus (mit EOS Connect)
+
+Wenn **SG3-Planung aktiv** ist, liefert der Zwilling ein verschiebbares Kontingent an die Load-ID
+`sg_load_id` (Standard `sg3_req`). EOS Connect platziert es mit dem eingebauten `local_evopt` gemeinsam
+mit Batterie, PV und Netzbezug. Das finale Profil geht an `profile_load_id` (Standard `hp_ext`).
+**Replaces sensor** dieses Profils muss auf den WP-Leistungssensor zeigen; das Kontingent selbst wird
+nach Adoption zurückgezogen. So ist die SG3-Energie nur einmal im System.
+
+- **Horizont:** 48 h, 15-min-Slots. Die Wirtschaftlichkeit wird nur für vollständig bepreiste
+  EOS-Slots bewertet. Fehlen Preise am Horizontende, wird diese Energie nicht geschätzt oder
+  verworfen; die Preisabdeckung steht in den SG3-Notizen. Ganz ohne bepreiste Energie bleibt
+  die SG2-Prognose aktiv (Degraded statt blindes SG3).
+- **Feasibility:** erlaubte Startslots, keine bloße Temperaturschwelle. Berücksichtigt werden laufende
+  Basisladung, aktuelle und prognostizierte `min_off`-Sperren, `min_on`, Horizontende, COP und die
+  konfigurierbare Bivalenz-Außentemperatur `sg_bivalence_outdoor_c` (Default 0 °C). Eine aktuell
+  laufende Basisladung sperrt nur bis zu ihrem prognostizierten Stopp (plus `min_off`), nicht den
+  gesamten Horizont. Der aktuelle
+  Simulationspfad modelliert keinen parallel zugeschalteten Heizstab; deshalb wird unterhalb dieser
+  Grenze kein SG3 angeboten. `sg_top_setpoint_c` steuert den SG3-Sollwert (Default 49,8 °C,
+  Median der gemessenen Referenzanlage). Das HK1-Ladeziel wird aus vollständigen historischen
+  SG3-Läufen kalibriert: Nur ein Stopp am erhöhten Sollwert zählt; ein früher Abbruch unter dem
+  Ziel ist kein abgeschlossener Lauf. Damit bleibt der normale SG2-Stopp separat und verzerrt das
+  SG3-Ziel nicht. In der Referenzhistorie liegt der SG3-Stopp etwa 1,6 K über dem Sollwert.
+
+  Jeder freie Startbereich wird zunächst über bis zu drei Stunden simuliert. Erst der tatsächliche
+  Stopp am HK1-Ziel bestimmt Laufzeit und zusätzliche elektrische Energie des Angebots. Ein kurzer
+  freier Bereich oder ein einzelner EOS-Slot ist daher **kein** abgeschlossener SG3-Lauf. Kann das
+  Ziel in dieser Zeit nicht erreicht werden, wird der Kandidat verworfen. Nach dem Zielstopp bleibt
+  der Verdichter für den Rest des SG3-Sollfensters aus; die folgende Pause bis zum nächsten normalen
+  Lauf wird separat ausgewiesen. In der lokalen Referenzhistorie dauern vollständige Läufe typischerweise
+  2–3 Stunden, gefolgt von mehrstündigen Pausen. Eine reine Lastverschiebung spart keine Energie, kann
+  aber Stromkosten senken. EOS erhält die zusätzliche elektrische Energie **des nachgewiesenen Laufs**
+  gegenüber der Basisprognose, nicht die Netto-Differenz über den gesamten Horizont. Später entfallene
+  SG2-Läufe mindern die Kosten, ohne dieses flexible Angebot zu löschen. Der normale WP-Grundbetrieb
+  wird nicht doppelt gezählt.
+- **Wert:** `value_eur_per_kwh` ist der Brutto-Vermeidungswert der Szenario-Differenz vor den Kosten
+  der SG3-Zusatzenergie. EOS vergleicht ihn mit den tatsächlichen Versorgungskosten.
+  `saving_eur = Kosten(SG2) − Kosten(SG3)` ist nur eine Dashboard-Kennzahl und wird nicht nochmals als
+  Solver-Reward verwendet. `total_wh` ist die zusätzliche elektrische Energie des SG3-Fensters.
+  Auch bei null oder negativem Netto-Mehrverbrauch über den Horizont kann ein Angebot entstehen:
+  Entscheidend sind geringere Versorgungskosten durch die Verschiebung, nicht Energieeinsparung.
+- **Zeitvertrag:** Contingent und Maske tragen `start` (ISO), `resolution: 15min` und eine
+  absolute ISO-`deadline` für das Ende des simulierten Sollfensters. `min_runtime_slots`
+  beschreibt die tatsächlich simulierte, auf EOS-Slots aufgerundete Kompressorlaufzeit;
+  `contiguous: true` verhindert Unterbrechungen und Nullenergie-Slots. Der Lauf wird nicht
+  künstlich auf einen vollen Sollfensterzeitraum verlängert. EOS Connect verteilt die
+  Szenario-Zusatzenergie über diesen Block; das ist keine Forderung nach Nennleistung in jedem Slot.
+  Ein früher Abbruch durch reale Anlagenbedingungen, etwa eine nicht ausreichende PV-Versorgung,
+  wird dadurch nicht als gewünschter Kurzlauf geplant. Das EOS-Placement wird mit `plan_anchor` und
+  `time_frame_base` zurückübersetzt und nur als **genau ein Block der angebotenen Dauer** übernommen.
+  Vor der Endprognose muss der tatsächlich platzierte Start erneut den thermischen Zielstopp erreichen.
+  `plan[]` enthält Wh, nicht W.
+- **Betrieb:** `sg_contingent_ttl_minutes` begrenzt die Gültigkeit. Es gibt **keine feste
+  PV-Schwelle und kein Preisdach mehr**. PV-Prognose und Tarife dienen nur der Diagnose;
+  EOS Connect entscheidet anhand Kontingent, Machbarkeit und Brutto-Vermeidungswert, wie
+  die Energie mit Netz, PV und Batterie platziert wird. Bestehende JSON-Konfigurationen
+  mit den alten Schlüsseln `sg_min_pv_surplus_w`, `sg_max_price_eur` und
+  `sg_emergency_gate` werden beim Laden ignoriert. `sg_dry_run` pusht nichts. Außerhalb
+  eines Startfensters werden alle konfigurierten Fenster im 48-h-Horizont geprüft, einschließlich
+  des Folgetags. Die reale SG-Ready-Ausführung am WPM (Phase 3) ist nicht Bestandteil dieses Zyklus.
+
+**Einstellungen im Dashboard:** `SG3-Load-ID`, `Profil-Load-ID`, `SG3-Bivalenz`,
+`Contingent-TTL`, `SG3-Planung aktiv` und `SG3 Dry-Run`. Alle Felder werden über
+`/api/settings` gespeichert und im portablen Konfigurations-Bundle mitgeführt. Für die erste Inbetriebnahme
+`sg_dry_run = true` lassen und Kandidaten/Maske prüfen. Der Produktivbetrieb erfordert `sg_enabled = true`,
+48 h Horizont, erreichbare EOS-URL und Preise für alle 48 h. Mindestlaufzeit und Max-Preis werden am
+`sg3_req`-Load in EOS Connect gesetzt, nicht im hp-twin-Dashboard.
+
+Der Status und das Dashboard zeigen Kandidaten, zulässige Startslots, `saving_eur`, Bruttowert,
+Placement und Degraded-Notizen. Die reine Analyseansicht verwendet dieselbe Thermik und Wetterdaten,
+schreibt aber keine EOS-Payloads. Das finale Profil enthält zusätzlich einen optionalen
+  `thermal`-Block mit dem tatsächlich übernommenen Verlauf: Puffer, DHW, Außentemperatur und
+  Betriebsmodus je 15 Minuten, beginnend beim echten Simulationsstart. Damit ist in EOS Connect
+  die Abkühlung nach SG3 bis zum nächsten SG2-Lauf sichtbar, nicht nur die elektrische Leistung.
+  `thermal.plan` bindet diesen Sidecar an das SG3-Kontingent und den tatsächlich adoptierten EOS-Block
+  samt `plan_anchor`; dadurch kann EOS eine veraltete Temperaturkurve nach einer Planverschiebung
+  verwerfen. Die Analyseansicht bleibt davon getrennt; das Dashboard zeigt auch Zielstopp und Folgepause.
+  Für den lokalen Integrations-Test kann EOS Connect über `EOS_HP_TWIN_LOCAL_URL` ausschließlich eine
+  Loopback-Adresse (`127.0.0.1` oder `localhost`) für `POST /api/push_now` verwenden. Das ist keine
+  produktive Konfiguration und beinhaltet keine Steuerung der Wärmepumpe oder des Batteriesystems.
+
+**SG3-Diagnose im Dashboard:** Unter der Lastprognose zeigt das Panel „SG3-Diagnose“ die
+Feasibility-Maske als Zeitachse, konfigurierte Startfenster mit UTC-Zeitpunkten, Sperrgründe,
+Kandidaten mit Energie/Leistung/Wirtschaftlichkeit, EOS-Placement samt `plan_anchor` sowie
+Dry-Run-/Push-/Adopt-Status. Für den gewählten Lauf zeigt das Panel Start-/Ziel-/Endtemperatur,
+tatsächliche Kompressorlaufzeit, den Zielstopp, das Ende des Sollfensters und die folgende Pause.
+Der Abschnitt „Verworfene Kandidaten und Gründe“ unterscheidet
+thermisch unzulässige Starts, fehlende Zusatzenergie und Preis-/Bewertungsfehler. So ist sichtbar,
+ob ein Lauf an Thermik, Marktdaten oder Wirtschaftlichkeit scheitert.
 
 ## Installation in Home Assistant (Add-on)
 EOS Connect läuft als HA-Add-on; hp-twin genauso. Siehe `hp-twin-addon/DOCS.md`. Kurz:

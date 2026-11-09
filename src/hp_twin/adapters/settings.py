@@ -43,8 +43,9 @@ class RuntimeSettings(BaseModel):
     sg_dry_run: bool = True  # True: Kandidaten+Placement berechnen, aber nichts pushen
     sg_load_id: str = "sg3_req"
     profile_load_id: str = "hp_ext"
-    sg_min_pv_surplus_w: float = 2500.0
-    sg_max_price_eur: float | None = None
+    sg_contingent_ttl_minutes: float = Field(default=60.0, gt=0, le=1440)
+    sg_bivalence_outdoor_c: float = 0.0
+    sg_top_setpoint_c: float = Field(default=49.8, ge=35.0, le=60.0)
     evcc_entities: dict[str, str] = Field(default_factory=dict)  # override defaults
     # EOS Connect
     eos_base_url: str = ""

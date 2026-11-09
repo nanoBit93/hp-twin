@@ -35,6 +35,12 @@
     .form input { width:100%; }
     .form .chk { flex-direction:row; align-items:center; gap:6px; }
     .ok { color:#5fd27a; } .bad { color:#ff6b6b; }
+    .sg-meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:8px 18px; margin:8px 0 12px; font-size:12px; color:var(--muted); }
+    .sg-meta strong { color:var(--fg); font-weight:600; }
+    .sg-reasons { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0 12px; }
+    .sg-reason { background:#0f1419; border:1px solid #2a3340; border-radius:5px; padding:3px 7px; color:var(--muted); font-size:11px; }
+    .sg-table-wrap { max-height:220px; overflow:auto; margin-top:8px; }
+    .sg-empty { color:var(--muted); padding:12px 0; }
   </style>
 </head>
 <body>
@@ -65,8 +71,9 @@
         <label>Weather-Entity (DWD)<input id="weather_entity" placeholder="weather.duesseldorf" /></label>
         <label>SG3-Load-ID<input id="sg_load_id" value="sg3_req" /></label>
         <label>Profil-Load-ID<input id="profile_load_id" value="hp_ext" /></label>
-        <label>SG3-PV-Schwelle (W)<input id="sg_min_pv_surplus_w" type="number" value="2500" /></label>
-        <label>Preisdach (€/kWh)<input id="sg_max_price_eur" type="number" step="0.01" placeholder="leer = nur PV" /></label>
+        <label>SG3-Bivalenz (°C)<input id="sg_bivalence_outdoor_c" type="number" step="0.5" value="0" /></label>
+        <label>SG3-Sollwert (°C)<input id="sg_top_setpoint_c" type="number" step="0.1" value="49.8" /></label>
+        <label>Contingent-TTL (min)<input id="sg_contingent_ttl_minutes" type="number" value="60" /></label>
         <label class="chk"><input id="auto_push_enabled" type="checkbox" /> Automatik aktiv</label>
         <label class="chk"><input id="export_before_push" type="checkbox" checked /> vor Push exportieren</label>
         <label class="chk"><input id="sg_enabled" type="checkbox" /> SG3-Planung aktiv (EOS-Contingent)</label>
@@ -98,6 +105,22 @@
     <div class="panel"><h2>Lastprognose (Monte-Carlo): P_el Erwartungswert + P10–P90</h2>
       <div id="fcNote" style="color:var(--muted);font-size:12px;margin-bottom:6px"></div>
       <div id="chartForecast" class="chart"></div></div>
+
+    <div class="panel" id="sg3Diagnostics"><h2>SG3-Diagnose: Startfenster, Sperrgründe und EOS-Placement</h2>
+      <div id="sg3Meta" class="sg-meta"></div>
+      <div id="sg3Reasons" class="sg-reasons"></div>
+      <div id="chartSg3" class="chart" style="height:280px"></div>
+      <div id="sg3Notes" class="notes"></div>
+      <div class="sg-table-wrap">
+        <table><thead><tr><th>Kandidat (UTC)</th><th>Ende</th><th>Energie</th><th>Max. Leistung</th><th>Saving</th><th>Bruttowert</th><th>Bewertung</th></tr></thead>
+        <tbody id="sg3Candidates"></tbody></table>
+      </div>
+      <details><summary>Verworfene Kandidaten und Gründe</summary>
+        <div class="sg-table-wrap"><table><thead><tr><th>Start (UTC)</th><th>Grund</th><th>Details</th></tr></thead>
+        <tbody id="sg3Rejected"></tbody></table></div>
+      </details>
+      <details><summary>SG3-Rohdaten (Maske, Fenster, Placement)</summary><pre id="sg3Raw"></pre></details>
+    </div>
 
     <div class="panel"><h2>Laufwahrscheinlichkeit je 15-min-Slot</h2>
       <div id="chartProb" class="chart" style="height:200px"></div></div>
@@ -144,6 +167,111 @@
 
     function kpi(v, l) { return `<div class="kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`; }
 
+    const SG_REASON_COLORS = {
+      ok:'#5fd27a', baseline_running:'#f08c3a', baseline_running_during_min_on:'#e05fd2',
+      min_off:'#e0b45f', buffer_at_sg3_target:'#4a9eff', cop_bivalence:'#ff6b6b',
+      min_on_beyond_horizon:'#9aa7b4', outside_start_window:'#394150', outside_horizon:'#394150'
+    };
+    function sgIso(frameStart, seconds) {
+      return frameStart ? new Date(new Date(frameStart).getTime() + seconds * 1000).toISOString().replace('.000Z','Z') : '–';
+    }
+    function sgFmt(iso) {
+      return iso && iso !== '–' ? new Date(iso).toLocaleString('de-DE', {timeZone:'UTC', day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) + ' UTC' : '–';
+    }
+    function sgEsc(value) {
+      return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function sgThermal(c, frameStart) {
+      const t = c?.thermal || {};
+      const adopted = t.adopted_target_reached !== undefined;
+      const done = adopted ? t.adopted_target_reached : t.target_reached;
+      const completion = adopted ? t.adopted_completion_s : t.completion_s;
+      const off = adopted ? t.adopted_following_off_s : t.following_off_s;
+      const endC = adopted ? t.adopted_end_buffer_c : t.end_buffer_c;
+      const targetC = adopted ? t.adopted_target_buffer_c : t.target_buffer_c;
+      return `<div class="sg-meta">`
+        + `<div>Thermisches Ziel<br><strong>${done === true ? 'erreicht und Verdichter gestoppt' : 'nicht nachgewiesen'}</strong></div>`
+        + `<div>HK1 Start → Ziel / Ende<br><strong>${t.start_buffer_c?.toFixed(1) ?? '–'} °C → ${targetC?.toFixed(1) ?? '–'} / ${endC?.toFixed(1) ?? '–'} °C</strong></div>`
+        + `<div>Kompressorlaufzeit<br><strong>${c?.runtime_min ?? '–'} min</strong> (Zielstopp ${completion === null || completion === undefined ? '–' : Math.round(completion / 60) + ' min'})</div>`
+        + `<div>Pause bis nächster normaler Lauf<br><strong>${off === null || off === undefined ? 'nicht im Horizont' : Math.round(off / 60) + ' min'}</strong></div>`
+        + `<div>Sollfenster endet<br><strong>${sgFmt(sgIso(frameStart, (c?.setpoint_end_min ?? 0) * 60))}</strong></div>`
+        + `</div>`;
+    }
+    function renderSg3(sg) {
+      const frameStart = sg.frame_start;
+      const feasible = sg.feasible || [], reasons = sg.feasible_reasons || [];
+      const candidates = sg.candidates || [], placements = sg.placement_slots || [];
+      const chosen = sg.chosen;
+      const state = sg.sg3_injected ? 'Placement injiziert'
+        : sg.contingency_withdrawn ? 'Kontingent zurückgezogen'
+        : sg.placement_rejected ? 'Placement verworfen'
+        : sg.contingency_pushed ? 'Kontingent aktiv / Placement ausstehend'
+        : 'Dry-Run / kein Push';
+      document.getElementById('sg3Meta').innerHTML = [
+        ['Status', sgEsc(state)],
+        ['Prognosebeginn', sgFmt(frameStart)],
+        ['Zulässige Startslots', `${feasible.filter(Boolean).length} / ${feasible.length}`],
+        ['Kandidaten', candidates.length],
+        ['EOS-Zeitanker', sgFmt(sg.eos_status?.plan_anchor)],
+        ['EOS-Raster', sg.eos_status?.time_frame_base ? `${sg.eos_status.time_frame_base} s` : '–'],
+        ['Gewählter Lauf', chosen ? sgFmt(sgIso(frameStart, chosen.start_min * 60)) : 'keiner'],
+        ['Geplante Blöcke', placements.length],
+      ].map(([label,value]) => `<div>${label}<br><strong>${value}</strong></div>`).join('')
+        + (chosen ? sgThermal(chosen, frameStart) : '');
+
+      const counts = {};
+      reasons.forEach(r => { counts[r] = (counts[r] || 0) + 1; });
+      document.getElementById('sg3Reasons').innerHTML = Object.entries(counts).map(([reason,count]) =>
+        `<span class="sg-reason" style="border-color:${SG_REASON_COLORS[reason] || '#9aa7b4'}">${sgEsc(reason)}: ${count}</span>`
+      ).join('') || '<span class="sg-empty">Keine Maskendaten vorhanden</span>';
+
+      const x = feasible.map((_,i) => i / 4);
+      const hover = feasible.map((_,i) => sgFmt(sgIso(frameStart, i * 900)) + '<br>' + (reasons[i] || 'keine Daten'));
+      const traces = [{x, y:feasible.map(v => v ? 1 : 0), type:'bar', name:'Thermisch erlaubte Startslots',
+        marker:{color:reasons.map(r => SG_REASON_COLORS[r] || '#9aa7b4')}, customdata:hover,
+        hovertemplate:'%{customdata}<extra></extra>', width:0.22}];
+      const allowed = sg.allowed_windows || [];
+      allowed.forEach(w => {
+        const x0 = w.start_s / 3600, x1 = w.end_s / 3600;
+        traces.push({x:[x0,x1,x1,x0,x0], y:[-0.15,-0.15,-0.05,-0.05,-0.15], mode:'lines',
+          line:{color:'#4a9eff',width:2}, fill:'toself', fillcolor:'rgba(74,158,255,0.16)',
+          name:'Konfiguriertes Startfenster', hoverinfo:'text',
+          text:`${sgFmt(w.start_iso)} – ${sgFmt(w.end_iso)}`, showlegend:false});
+      });
+      if (placements.length) {
+        traces.push({x:placements.map(p => p[0] / 4), y:placements.map(p => -0.35), type:'bar',
+          name:'EOS-Placement (Wh)', marker:{color:'#5fd27a'}, customdata:placements.map(p =>
+            `${sgFmt(sgIso(frameStart, p[0] * 900))}<br>${p[1]} Wh`), hovertemplate:'%{customdata}<extra></extra>', width:0.22});
+      }
+      candidates.forEach((c,i) => {
+        traces.push({x:[c.start_min/60,c.start_min/60], y:[-0.5,1.15], mode:'lines',
+          line:{color:i === 0 && chosen && c.start_min === chosen.start_min ? '#f08c3a' : '#e0b45f', dash:'dash'},
+          name:i === 0 ? 'Simulierter Kandidat' : undefined, showlegend:i === 0,
+          hoverinfo:'text', text:`Kandidat: ${sgFmt(sgIso(frameStart,c.start_min*60))}<br>${c.energy_wh} Wh`});
+      });
+      Plotly.newPlot('chartSg3', traces, {...L,
+        yaxis:{...L.yaxis,title:'Start erlaubt / Placement',range:[-0.6,1.2],tickvals:[-0.35,0,1],ticktext:['EOS-Placement','gesperrt','erlaubt']},
+        xaxis:{...L.xaxis,title:'Stunden nach Prognosebeginn (UTC-Zeitpunkte im Tooltip)'},
+        barmode:'overlay', showlegend:true}, cfg);
+
+      document.getElementById('sg3Candidates').innerHTML = candidates.length ? candidates.map(c =>
+        `<tr><td>${sgFmt(sgIso(frameStart,c.start_min*60))}</td><td>${sgFmt(sgIso(frameStart,c.end_min*60))}</td><td>${c.energy_wh} Wh</td><td>${c.max_power_w} W</td><td>${Number(c.saving_eur).toFixed(2)} €</td><td>${Number(c.value_eur_per_kwh).toFixed(3)} €/kWh</td><td>${sgEsc(c.reason)}</td></tr>`
+      ).join('') : '<tr><td colspan="7" class="sg-empty">Keine Kandidaten im ausgewerteten Fenster – Sperrgründe oben prüfen.</td></tr>';
+      const rejected = sg.rejected_candidates || [];
+      document.getElementById('sg3Rejected').innerHTML = rejected.length ? rejected.map(c =>
+        `<tr><td>${sgFmt(sgIso(frameStart,c.start_s))}</td><td>${sgEsc(c.reason)}</td><td>${sgEsc(c.detail || (c.energy_wh !== undefined ? `${c.energy_wh} Wh` : '–'))}</td></tr>`
+      ).join('') : '<tr><td colspan="3" class="sg-empty">Keine verworfenen Kandidaten.</td></tr>';
+      const notes = sg.notes || [];
+      document.getElementById('sg3Notes').innerHTML = notes.length
+        ? `<ul>${notes.map(n => `<li>${sgEsc(n)}</li>`).join('')}</ul>` : '';
+      document.getElementById('sg3Raw').textContent = JSON.stringify({
+        frame_start:frameStart, allowed_windows:allowed, feasible, feasible_reasons:reasons,
+        candidates, rejected_candidates:rejected, chosen, placement_slots:placements, eos_status:sg.eos_status,
+        contingency_pushed:sg.contingency_pushed, contingency_withdrawn:sg.contingency_withdrawn,
+        sg3_injected:sg.sg3_injected,
+      }, null, 2);
+    }
+
     function render(d) {
       const f = d.forecast, s = d.sim, fac = d.factors, cal = d.calibration.heat_pump;
       document.getElementById('kpis').innerHTML =
@@ -156,6 +284,7 @@
       const ss = f.start_state;
       const wx = f.weather || {};
       const sg = d.sg_plan || {};
+      renderSg3(sg);
       document.getElementById('fcNote').innerHTML = f.mode==='live'
         ? `Prognose ab <b>jetzt</b>: Startzustand gemessen (${new Date(ss.last_measurement).toLocaleTimeString()}): Puffer ${ss.buffer_c} °C, DHW ${ss.dhw_c} °C.`
           + (wx.entity ? ` Wetter: <b>${wx.entity}</b> (${wx.horizon_h} h DWD), danach 24-h-Fallback.` : ' Wetter: <b>letzte 24 h wiederholt</b> (keine Weather-Entity gesetzt).')
@@ -215,7 +344,7 @@
     }
 
     // --- Settings & Automatik ---
-    const S_FIELDS = ['ha_base_url','eos_base_url','eos_managed_load_id','eos_ttl_minutes','forecast_runs','horizon_h','dhw_setpoint_cap_c','export_window_hours','schedule_interval_minutes','weather_entity','sg_load_id','profile_load_id','sg_min_pv_surplus_w','sg_max_price_eur'];
+    const S_FIELDS = ['ha_base_url','eos_base_url','eos_managed_load_id','eos_ttl_minutes','forecast_runs','horizon_h','dhw_setpoint_cap_c','export_window_hours','schedule_interval_minutes','weather_entity','sg_load_id','profile_load_id','sg_bivalence_outdoor_c','sg_top_setpoint_c','sg_contingent_ttl_minutes'];
     async function loadSettings() {
       try {
         const s = await (await fetch('api/settings')).json();
@@ -296,7 +425,13 @@
       const miss = (s.missing_config||[]).length
         ? `<div class="bad" style="margin-bottom:6px">⚠ Konfiguration unvollständig (fehlt: ${s.missing_config.join(', ')}) – unten „⬆ Config importieren".</div>` : '';
       const run = s.running ? `<div style="margin-bottom:6px">⏳ <b>läuft:</b> ${s.phase||'…'}</div>` : '';
-      return miss + run + `Automatik: <b>${s.auto_push_enabled?'AN':'aus'}</b> (alle ${s.schedule_interval_minutes} min) · EOS ${s.eos_configured?'konfiguriert':'<span class="bad">fehlt</span>'} · Datenalter: <b>${ageTxt}</b> ${sync}<br>Letzter Lauf: ${last} · ${res}`;
+      const sg = s.sg_plan || {};
+      const chosen = sg.chosen;
+      const sgText = chosen
+        ? `<br>SG3: ${sg.feasible_slots||0} zulässige Startslots · Mehrverbrauch ${chosen.energy_wh} Wh · Saving ${Number(chosen.saving_eur).toFixed(2)} € · Bruttowert ${Number(chosen.value_eur_per_kwh).toFixed(3)} €/kWh · ${sg.contingency_withdrawn ? 'Kontingent zurückgezogen' : (sg.sg3_injected ? 'Placement injiziert' : 'wartet auf Placement')}`
+        : '';
+      const sgNotes = sg.notes?.length ? `<br><span style="color:var(--muted)">${sg.notes.join(' · ')}</span>` : '';
+      return miss + run + `Automatik: <b>${s.auto_push_enabled?'AN':'aus'}</b> (alle ${s.schedule_interval_minutes} min) · EOS ${s.eos_configured?'konfiguriert':'<span class="bad">fehlt</span>'} · Datenalter: <b>${ageTxt}</b> ${sync}<br>Letzter Lauf: ${last} · ${res}${sgText}${sgNotes}`;
     }
     async function refreshStatus() {
       try { document.getElementById('status').innerHTML = fmtStatus(await (await fetch('api/status')).json()); } catch(e) {}

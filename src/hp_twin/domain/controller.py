@@ -40,6 +40,7 @@ class ControllerState:
     time_in_mode_s: float = 0.0
     time_since_stop_s: float = 1e9  # groß -> darf sofort starten
     active_node: str | None = None
+    sg3_target_reached: bool = False
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,10 @@ class Controller:
                 return state, self._charge_decision(Mode.HEAT_DHW, self.dhw_node, sp)
         elif state.mode == Mode.HEAT_BUFFER:
             done = self._reached(t_buf, sp.buffer_c, sp.buffer_overshoot_k)
+            if done and sp.buffer_c >= 38.0:
+                # Only an elevated SG3 setpoint owns the completion latch. A
+                # normal SG2 stop must be allowed to start again after min_off.
+                state.sg3_target_reached = True
             if done and state.time_in_mode_s >= self.config.min_on_s:
                 state = _transition(Mode.PAUSE, None)
                 state.time_since_stop_s = 0.0
@@ -109,6 +114,10 @@ class Controller:
         # --- IDLE: Startbedarf prüfen (Warmwasservorrang) ---
         want_dhw = self._wants(t_dhw, sp.dhw_c, sp.dhw_hysteresis_k)
         want_buf = self._wants(t_buf, sp.buffer_c, sp.buffer_hysteresis_k)
+        if state.sg3_target_reached and sp.buffer_c >= 38.0:
+            want_buf = False
+        elif sp.buffer_c < 38.0:
+            state.sg3_target_reached = False
         can_start = state.time_since_stop_s >= min_off
         if can_start and want_dhw:
             state = _transition(Mode.HEAT_DHW, self.dhw_node)
