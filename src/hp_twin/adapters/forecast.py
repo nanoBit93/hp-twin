@@ -14,7 +14,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hp_twin.adapters.eos_connect import EosLoadProfile, load_profile_from_slots
+from hp_twin.adapters.eos_connect import (
+    EosLoadProfile,
+    load_profile_from_slots,
+    thermal_sidecar,
+)
 from hp_twin.adapters.replay import (
     build_forecast_frame,
     build_replay,
@@ -30,6 +34,7 @@ from hp_twin.domain.montecarlo import (
     aggregate_slots,
     extract_events,
 )
+from hp_twin.domain.sg_plan import DEFAULT_SG3_MIN_SETPOINT_C
 from hp_twin.domain.topology import Topology
 
 log = logging.getLogger(__name__)
@@ -43,6 +48,11 @@ class ForecastResult:
     deterministic_p_el_w: np.ndarray
     time_s: np.ndarray
     buffer_sim_c: np.ndarray | None = None  # det. Pufferverlauf (SG-Kandidaten)
+    dhw_sim_c: np.ndarray | None = None
+    frame_start: pd.Timestamp | None = None
+    outdoor_c: np.ndarray | None = None
+    heat_pump: Any = None
+    controller_mode: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         s = self.slots
@@ -163,6 +173,8 @@ def run_live_forecast(
     sg3_start_s: float | None = None,
     sg3_end_s: float | None = None,
     sg3_top_c: float | None = None,
+    sg3_windows: list[tuple[float, float]] | None = None,
+    thermal_plan: dict[str, Any] | None = None,
 ) -> ForecastResult:
     """ECHTE Vorwärtsprognose ab dem letzten Messpunkt ("jetzt").
 
@@ -170,16 +182,20 @@ def run_live_forecast(
     Zukünftige Eingänge: Wetter optional über einen Vorhersage-Frame (DWD via Home Assistant),
     Rest (Soll-/Raumsollwerte, SG) letzte 24 h täglich wiederholt (siehe build_forecast_frame).
 
-    sg3_start_s/sg3_end_s/sg3_top_c: optionaler SG3-Sollverlauf ab Frame-Start (Rück-
-    Injection des EOS-Placements durch den SG-Orchestrator); None = Basis-Lauf ohne SG3.
+    ``sg3_windows`` injiziert alle geplanten Laufblöcke in einem einzigen Lauf, damit
+    min_on/min_off und Speicherzustand zwischen den Blöcken erhalten bleiben.
     """
     model = model or ModelConfig()
     horizon_h = horizon_h if horizon_h is not None else model.sim.horizon_h
-    frame = build_forecast_frame(df, horizon_h, weather=weather, strip_sg3=sg3_start_s is None)
-    if sg3_start_s is not None and sg3_end_s is not None:
-        frame = _inject_sg3_window(
-            frame, float(sg3_start_s), float(sg3_end_s), float(sg3_top_c or 46.0)
-        )
+    if sg3_windows is None and sg3_start_s is not None and sg3_end_s is not None:
+        sg3_windows = [(float(sg3_start_s), float(sg3_end_s))]
+    frame = build_forecast_frame(df, horizon_h, weather=weather, strip_sg3=not sg3_windows)
+    if sg3_windows:
+        frame = _inject_sg3_windows(frame, sg3_windows, float(sg3_top_c or 46.0))
+        if calib.sg3_buffer_threshold is not None:
+            # The SG3 target has its own measured completion threshold. The
+            # mixed SG2/SG3 median is not valid for the high-temperature run.
+            model.controller.buffer_overshoot_k = calib.sg3_buffer_threshold.stop_offset_k
     cs = initial_controller_state(df, topology.controller.min_off_s)
     result = run_forecast(
         frame, topology, calib, 0, horizon_h=horizon_h, model=model, ctrl_state=cs
@@ -198,18 +214,58 @@ def run_live_forecast(
         ctrl_state=copy.copy(cs),
     )
     result.buffer_sim_c = np.asarray(det.result.node_temps_c["buffer"], dtype=float)
+    result.dhw_sim_c = np.asarray(det.result.node_temps_c["dhw"], dtype=float)
+    result.frame_start = frame.index[0]
+    result.outdoor_c = frame["t_outdoor_c"].astype(float).ffill().bfill().to_numpy()
+    result.heat_pump = calib.heat_pump.heat_pump
+    result.controller_mode = list(det.result.mode)
+    reference_slots = aggregate_slots(
+        result.time_s,
+        [result.deterministic_p_el_w],
+        slot_s=model.forecast.slot_s,
+        running_threshold_w=model.forecast.running_threshold_w,
+    )
+    if result.frame_start is not None:
+        result.eos = EosLoadProfile(
+            values_w=result.eos.values_w,
+            unit=result.eos.unit,
+            start=result.frame_start.isoformat(),
+            ttl_minutes=result.eos.ttl_minutes,
+            thermal=thermal_sidecar(
+                buffer_c=result.buffer_sim_c,
+                dhw_c=result.dhw_sim_c,
+                outdoor_c=result.outdoor_c,
+                mode=result.controller_mode,
+                run_probability=reference_slots.run_probability,
+                running_threshold_w=model.forecast.running_threshold_w,
+                time_s=result.time_s,
+                start=result.frame_start,
+                slot_s=model.forecast.slot_s,
+                plan=thermal_plan,
+            ),
+        )
     return result
 
 
-def _inject_sg3_window(
-    frame: pd.DataFrame, start_s: float, end_s: float, top_c: float
+def _inject_sg3_windows(
+    frame: pd.DataFrame, windows: list[tuple[float, float]], top_c: float
 ) -> pd.DataFrame:
-    """SG3-Sollverlauf am Placement in den Zukunftsframe injizieren (HK1-Soll)."""
+    """Inject every scheduled run block into one consistent future frame."""
     from hp_twin.domain.sg_plan import inject_sg3_start
 
     dt_s = float(frame.index.to_series().diff().dropna().iloc[0].total_seconds())
-    i0 = int(round(start_s / dt_s))
-    i1 = int(round(end_s / dt_s))
     hk1 = frame["setpoint_hk1_c"].to_numpy(dtype=float)
-    frame["setpoint_hk1_c"] = inject_sg3_start(hk1, i0, i1, top_c)
+    for start_s, end_s in sorted(windows):
+        i0 = int(round(start_s / dt_s))
+        i1 = int(round(end_s / dt_s))
+        hk1 = inject_sg3_start(
+            hk1,
+            i0,
+            i1,
+            top_c,
+            ramp_s=900.0,
+            min_setpoint_c=DEFAULT_SG3_MIN_SETPOINT_C,
+            dt_s=dt_s,
+        )
+    frame["setpoint_hk1_c"] = hk1
     return frame

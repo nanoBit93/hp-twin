@@ -66,6 +66,7 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         fit_heatpump_map,
     )
     from hp_twin.domain.model_config import ModelConfig
+    from hp_twin.domain.sg_plan import DEFAULT_SG3_MIN_SETPOINT_C
 
     model = model or ModelConfig()
     cal = model.calibration
@@ -97,6 +98,15 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         df["setpoint_hk1_c"].to_numpy(),
         circuit="buffer",
     )
+    sg3_thr = estimate_thresholds(
+        df["compressor_on"].to_numpy(),
+        df["t_hk1_c"].to_numpy(),
+        df["setpoint_hk1_c"].to_numpy(),
+        circuit="sg3_buffer",
+        min_setpoint_c=DEFAULT_SG3_MIN_SETPOINT_C,
+        target_tolerance_k=0.5,
+    )
+    sg3_fit = sg3_thr if sg3_thr.n_stops >= 2 else None
     rooms = room_columns(df.reset_index())
     driver = df[rooms].mean(axis=1).to_numpy() - df["t_outdoor_c"].to_numpy()
     vol = next((n.volume_l for n in topo.storage.nodes if n.id == "buffer"), 300.0)
@@ -121,7 +131,13 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
     return (
         topo,
         df,
-        CalibrationReport(heat_pump=hp_fit, buffer_threshold=thr, discharge=dis, notes=notes),
+        CalibrationReport(
+            heat_pump=hp_fit,
+            buffer_threshold=thr,
+            discharge=dis,
+            notes=notes,
+            sg3_buffer_threshold=sg3_fit,
+        ),
     )
 
 
@@ -136,7 +152,12 @@ def resolve_calibration(settings: Any, model: Any):  # type: ignore[no-untyped-d
     import json
 
     from hp_twin.adapters.io_csv import read_measurements
-    from hp_twin.domain.calibration import calibration_from_json, calibration_to_json
+    from hp_twin.domain.calibration import (
+        calibration_from_json,
+        calibration_to_json,
+        estimate_thresholds,
+    )
+    from hp_twin.domain.sg_plan import DEFAULT_SG3_MIN_SETPOINT_C
 
     topo = load_topology(settings.topology_path)
     csv = Path(settings.csv_path)
@@ -154,6 +175,24 @@ def resolve_calibration(settings: Any, model: Any):  # type: ignore[no-untyped-d
             f"gespeicherte Kalibrierung genutzt (Historie {span_days:.1f} d, "
             f"Mindestens {model.calibration.min_fit_days:g} d für einen neuen Fit)"
         )
+        if calib.sg3_buffer_threshold is None and df is not None and not too_short:
+            sg3_thr = estimate_thresholds(
+                df["compressor_on"].to_numpy(),
+                df["t_hk1_c"].to_numpy(),
+                df["setpoint_hk1_c"].to_numpy(),
+                circuit="sg3_buffer",
+                min_setpoint_c=DEFAULT_SG3_MIN_SETPOINT_C,
+                target_tolerance_k=0.5,
+            )
+            if sg3_thr.n_stops >= 2:
+                calib.sg3_buffer_threshold = sg3_thr
+                stored.write_text(
+                    json.dumps(calibration_to_json(calib), indent=2, ensure_ascii=False), "utf-8"
+                )
+                calib.notes.append(
+                    f"SG3-Zielstopp aus {sg3_thr.n_stops} zielerreichten Läufen ergänzt "
+                    f"(+{sg3_thr.stop_offset_k:.1f} K); SG2-Kalibrierung unverändert"
+                )
         return topo, df, calib
     topo, df, calib = _calibrate_report(settings.topology_path, settings.csv_path, model=model)
     if too_short:

@@ -102,7 +102,9 @@ def aggregate_slots(
         p_el_p50_w=np.percentile(slot_matrix, 50, axis=0),
         p_el_p90_w=np.percentile(slot_matrix, 90, axis=0),
         energy_wh=mean * slot_s / 3600.0,
-        run_probability=(run_matrix > 0.5).mean(axis=0),
+        # Fraction of each slot genuinely above the operating threshold, not
+        # the fraction of ensemble runs whose majority is active.
+        run_probability=run_matrix.mean(axis=0),
     )
 
 

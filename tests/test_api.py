@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from hp_twin.adapters.settings import RuntimeSettings
 from hp_twin.api.app import app
 
 
@@ -48,3 +49,35 @@ def test_versions_in_sync() -> None:
 
 def test_api_version() -> None:
     assert "version" in TestClient(app).get("/api/version").json()
+
+
+def test_refresh_while_running_runs_once_more_with_latest_settings(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import threading
+
+    import hp_twin.api.app as api
+
+    monkeypatch.setenv("HP_TWIN_RUNTIME", str(tmp_path / "runtime.json"))
+    RuntimeSettings().save()
+    api._PENDING_RUNS.clear()
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def fake_cycle(settings, do_push, status):
+        calls.append((settings.schedule_interval_minutes, do_push))
+        started.set()
+        release.wait(timeout=2)
+        status.running = False
+
+    monkeypatch.setattr(api, "run_cycle", fake_cycle)
+    worker = threading.Thread(target=api._run_locked, args=(RuntimeSettings(), True))
+    worker.start()
+    assert started.wait(timeout=1)
+    assert not api._run_locked(RuntimeSettings(schedule_interval_minutes=5.0), True)
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert calls == [(15.0, True), (5.0, True)]

@@ -113,9 +113,8 @@ def build_analysis(
         sg_cfg = SgPlanConfig(
             enabled=True,
             sg3_load_id=settings.sg_load_id,
-            profile_load_id=settings.profile_load_id,
-            min_pv_surplus_w=float(settings.sg_min_pv_surplus_w),
-            max_price_eur=settings.sg_max_price_eur,
+            bivalence_outdoor_c=float(settings.sg_bivalence_outdoor_c),
+            sg3_top_setpoint_c=float(settings.sg_top_setpoint_c),
             dry_run=True,  # Analysis ist lesend -> nichts pushen; Placement via Folgetakt
         )
         try:
@@ -128,6 +127,7 @@ def build_analysis(
                 market=fetch_market_series_safe(settings),
                 cfg=sg_cfg,
                 eos_base_url="",
+                weather=weather,
             )
             sg_plan_meta.update(sg_res.to_dict())
         except (ValueError, RuntimeError) as e:

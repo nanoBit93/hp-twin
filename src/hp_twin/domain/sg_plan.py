@@ -15,6 +15,7 @@ dhw_setpoint_cap).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -98,11 +99,17 @@ def inject_sg3_start(
     end_idx: int,
     sg3_top_c: float,
     min_ramp_k: float = 5.0,
+    *,
+    ramp_s: float | None = None,
+    min_setpoint_c: float | None = None,
+    dt_s: float = 60.0,
 ) -> np.ndarray:
     """SG3-Sollverlauf für [start_idx, end_idx) zurücksetzen (Return = neue HK1-Spur).
 
-    Anstieg auf `sg3_top_c` über die ersten ~1/3 des Fensters (die WPM rampet), danach
-    Plateau bis Fenstende; danach gilt die Basis-Spur weiter.
+    Der gemessene Regler schaltet den Sollwert direkt auf das SG3-Niveau. Ein
+    optionaler, zeitbasierter Anstieg bleibt für einen simulierten Lauf unabhängig
+    von dessen späterer EOS-Slotdauer. `min_setpoint_c` ist die explizite
+    Zielverriegelung im Regler und verhindert unnötige Starts im selben SG3-Fenster.
     """
     n = len(setpoint_hk1_c)
     sp = np.asarray(setpoint_hk1_c, dtype=float).copy()
@@ -111,8 +118,14 @@ def inject_sg3_start(
     span = end_idx - start_idx
     base_level = float(sp[start_idx - 1]) if start_idx > 0 else float(sp[start_idx])
     top = max(float(sg3_top_c), base_level + min_ramp_k)
-    ramp = np.clip((np.arange(span) + 1) / max(span / 3.0, 1.0), 0.0, 1.0)
+    if ramp_s is not None:
+        ramp_steps = max(int(np.ceil(ramp_s / dt_s)), 1)
+    else:
+        ramp_steps = max(int(np.ceil(span / 3.0)), 1)
+    ramp = np.clip((np.arange(span) + 1) / ramp_steps, 0.0, 1.0)
     sp[start_idx:end_idx] = base_level + (top - base_level) * ramp
+    if min_setpoint_c is not None:
+        sp[start_idx:end_idx] = np.maximum(sp[start_idx:end_idx], min_setpoint_c)
     return sp
 
 
@@ -121,7 +134,6 @@ def inject_sg3_start(
 
 def sg3_candidates(
     t_buffer_c: np.ndarray,
-    buffer_setpoint_c: np.ndarray,
     buffer_overshoot_k: float,
     running_w: np.ndarray,
     running_threshold_w: float,
@@ -130,27 +142,22 @@ def sg3_candidates(
     allowed_start_s: float,
     allowed_end_s: float,
     sg3_top_c: float,
-    max_duration_s: float = 3 * 3600.0,
 ) -> list[tuple[float, float]]:
-    """Thermisch mögliche SG3-Startfenster im Basis-Lauf ([start_s, end_s], Simulationszeit).
+    """Thermisch mögliche SG3-Startbereiche im Basis-Lauf ([start_s, end_s]).
 
-    Ein Start ist möglich, wenn der Puffer in der Basis-Prognose durch Ladung/Entladung
-    den Startbereich erreicht (t_buffer < sg3_top_c - Hysterese-Ersatz) bzw. geladen
-    würde — vereinfacht: Startfenster, in denen die WP im Basis-Lauf bereits läuft oder
-    der Puffer weit unter SG3-Top steht (dann lohnt SG3), und nicht im min_off-Lock.
+    Die Enden beschreiben nur den freien Startbereich. Die tatsächliche Dauer und
+    der Zielabschluss werden anschließend von der vollständigen Simulation bestimmt.
     """
-    n = min(len(t_buffer_c), len(buffer_setpoint_c), len(running_w))
+    n = min(len(t_buffer_c), len(running_w))
     t_buf = np.asarray(t_buffer_c, dtype=float)[:n]
     running = np.asarray(running_w, dtype=float)[:n] > running_threshold_w
     # min_off-Lock nach jedem Basis-Stopp
     stop_idx = np.where(np.diff(running.astype(int)) == -1)[0]
-    lock_until = min_off_s  # absolute Zeitstempel
     locks = np.zeros(n, dtype=bool)
     for i in stop_idx:
         lo = i + 1
         hi = min(n, i + 1 + int(round(min_off_s / dt_s)))
         locks[lo:hi] = True
-    del lock_until
 
     cands: list[tuple[float, float]] = []
     in_window = False
@@ -172,16 +179,10 @@ def sg3_candidates(
             in_window = False
     if in_window:
         cands.append((start_i * dt_s, n * dt_s))
-    # Fenster kappen auf max_duration
-    capped: list[tuple[float, float]] = []
-    for lo, hi in cands:
-        while lo < hi:
-            hi_c = min(hi, lo + max_duration_s)
-            capped.append((lo, hi_c))
-            lo = hi_c
-            if hi_c >= hi:
-                break
-    return capped
+    # The free region identifies a possible start, not the compressor duration.
+    # Its end is irrelevant for the EOS offer: the thermal simulation runs from
+    # the first allowed start to target completion or the configured limit.
+    return [(lo, hi) for lo, hi in cands if hi > lo]
 
 
 # --- Contingent-Bildung (wirtschaftliche Bewertung) ------------------------------------------
@@ -196,45 +197,211 @@ class SgCandidate:
     energy_wh: float
     max_power_w: float
     reason: str
+    feasible: tuple[bool, ...] | None = None
+    value_eur_per_kwh: float | None = None
+    saving_eur: float | None = None
+    avoided_eur: float | None = None
+    baseline_cost_eur: float | None = None
+    sg3_cost_eur: float | None = None
+    thermal: dict[str, Any] | None = None
+
+    @property
+    def runtime_s(self) -> float:
+        """Offered compressor operation, distinct from the setpoint deadline."""
+        if self.thermal is not None and self.thermal.get("offer_end_s") is not None:
+            return float(self.thermal["offer_end_s"]) - self.start_s
+        return self.end_s - self.start_s
+
+    @property
+    def setpoint_end_s(self) -> float:
+        """End of elevated setpoint, including EOS's final partial-slot rounding."""
+        if self.thermal is not None and self.thermal.get("setpoint_end_s") is not None:
+            return float(self.thermal["setpoint_end_s"])
+        return self.end_s
 
     def deadline_hours(self) -> float:
-        """Letzter Slot des Fensters relativ zum Frame-Start, in Stunden aufgerundet."""
-        return float(np.ceil(self.end_s / 3600.0))
+        """Absolute candidate end as hours from the forecast frame start.
+
+        EOS measures this duration from its current planning slot. Since the
+        twin's frame_start is that same slot, end_s is already the correct
+        absolute endpoint; adding start_s again would incorrectly shorten or
+        lengthen the permissible placement period.
+        """
+        return float(max(1 / 60, self.end_s / 3600.0))
 
 
-def evaluate_candidate(
-    start_s: float,
-    end_s: float,
-    energy_wh: float,
-    max_power_w: float,
+def evaluate_sg3_economics(
+    basis_power_w: np.ndarray,
+    sg3_power_w: np.ndarray,
+    price_eur_per_kwh: np.ndarray,
+    *,
+    dt_s: float,
     slot_s: float,
-    solar_surplus_w: np.ndarray | None,
-    min_pv_surplus_w: float,
-    price_eur_per_kwh: np.ndarray | None = None,
-    max_price_eur: float | None = None,
-) -> SgCandidate | None:
-    """Bewertet ein thermisches Fenster gegen die Markt-Signale; None = nicht sinnvoll.
+    outdoor_c: np.ndarray,
+    offered_wh: float | None = None,
+) -> dict[str, Any]:
+    """Value the full scenario while EOS prices the complete offered window.
 
-    Sinnvoll, wenn im Fenster (a) der PV-Überschuss mindestens einmal >= Schwelle ist
-    ODER (b) ein Preis <= Preisdach vorliegt. Fehlt das Markt-Signal (None/NaN), zählt
-    das Fenster als unentschieden und wird nicht empfohlen (kein blindes SG3).
+    SG3 is a temporal shift, not an energy-saving measure. ``offered_wh`` is the
+    additional electrical energy inside the SG3 setpoint window, before displaced
+    baseline runs elsewhere in the horizon. Only displaced baseline energy carries
+    avoided cost; unchanged operation and standby do not inflate the offer value.
+    A zero or negative horizon-wide net-energy difference must not suppress it.
     """
+    baseline = np.asarray(basis_power_w, dtype=float)
+    sg3 = np.asarray(sg3_power_w, dtype=float)
+    prices = np.asarray(price_eur_per_kwh, dtype=float)
+    if not (len(baseline) == len(sg3) == len(outdoor_c)):
+        raise ValueError(
+            "SG3 scenarios and outdoor forecast must share one time axis: "
+            f"baseline={len(baseline)}, sg3={len(sg3)}, outdoor={len(outdoor_c)}"
+        )
+    if len(baseline) < 2 or slot_s < dt_s:
+        raise ValueError("SG3 economics requires a forecast and compatible slot lengths")
+    steps_per_slot = int(round(slot_s / dt_s))
+    if abs(steps_per_slot * dt_s - slot_s) > 1e-6:
+        raise ValueError("SG3 simulation steps do not fit the EOS slot length")
+    prices = np.repeat(prices, steps_per_slot)[: len(baseline)]
+    if len(prices) != len(baseline):
+        raise ValueError(
+            f"SG3 price slots do not cover the forecast: prices={len(prices)}, "
+            f"required={len(baseline)}"
+        )
 
-    def _slots(a: np.ndarray) -> np.ndarray:
-        i0 = int(round(start_s / slot_s))
-        i1 = max(i0 + 1, int(np.ceil(end_s / slot_s)))
-        return np.asarray(a, dtype=float)[i0:i1]
+    # Do not invent missing tariffs. Evaluate only complete, priced EOS slots;
+    # a later publication gap must not erase a fully priced morning window.
+    slot_count = int(np.ceil(len(baseline) * dt_s / slot_s))
+    priced_steps = np.zeros(len(baseline), dtype=bool)
+    for slot in range(slot_count):
+        i0 = int(slot * slot_s / dt_s)
+        i1 = min(len(baseline), int((slot + 1) * slot_s / dt_s))
+        if i1 > i0 and np.isfinite(prices[i0:i1]).all():
+            priced_steps[i0:i1] = True
+    covered_baseline_wh = float(np.sum(baseline[priced_steps] * dt_s / 3600.0))
+    covered_sg3_wh = float(np.sum(sg3[priced_steps] * dt_s / 3600.0))
+    total_baseline_wh = float(np.sum(baseline * dt_s / 3600.0))
+    if covered_baseline_wh <= 0.0 or covered_sg3_wh <= 0.0:
+        raise ValueError("SG3 economics has no fully priced energy in the forecast")
+    baseline = baseline[priced_steps]
+    sg3 = sg3[priced_steps]
+    prices = prices[priced_steps]
+    baseline_cost = float(np.sum(baseline * prices * dt_s / 3600.0) / 1000.0)
+    sg3_cost = float(np.sum(sg3 * prices * dt_s / 3600.0) / 1000.0)
+    extra_kwh = (sg3 - baseline) * dt_s / 3600.0 / 1000.0
+    displaced_w = np.maximum(baseline - sg3, 0.0)
+    avoided = float(np.sum(displaced_w * prices * dt_s / 3600.0) / 1000.0)
+    total_extra_wh = float(np.sum(extra_kwh) * 1000.0)
+    denominator_wh = offered_wh if offered_wh is not None else total_extra_wh
+    if denominator_wh <= 0.0:
+        raise ValueError("SG3 offer has no electrical energy in its operating window")
+    if avoided <= 0.0:
+        raise ValueError("SG3 scenario has no positive avoided-cost value")
 
+    return {
+        "baseline_cost_eur": baseline_cost,
+        "sg3_cost_eur": sg3_cost,
+        "saving_eur": baseline_cost - sg3_cost,
+        "avoided_eur": avoided,
+        "value_eur_per_kwh": avoided / (denominator_wh / 1000.0),
+        "total_extra_wh": total_extra_wh,
+        "offered_wh": denominator_wh,
+        "priced_baseline_fraction": covered_baseline_wh / max(total_baseline_wh, 1e-9),
+        "priced_slots": int(np.sum(priced_steps) / steps_per_slot),
+        "total_slots": slot_count,
+    }
+
+
+def sg3_start_feasible_slots(
+    *,
+    t_buffer_c: np.ndarray,
+    running_w: np.ndarray,
+    outdoor_c: np.ndarray,
+    initial_controller_state: Any,
+    heat_pump: Any,
+    controller_config: Any,
+    sg3_top_c: float,
+    flow_offset_k: float,
+    buffer_overshoot_k: float,
+    running_threshold_w: float,
+    dt_s: float,
+    slot_s: float,
+    allowed_start_s: float,
+    allowed_end_s: float,
+    max_duration_s: float,
+    min_cop: float = 1.5,
+    bivalence_outdoor_c: float = 0.0,
+) -> tuple[list[bool], list[str]]:
+    """Return EOS-aligned *start* feasibility and a reason for every slot.
+
+    EOS expands a permitted start by its configured minimum runtime. Here the full
+    allowed run must fit min_on, max_duration and the remaining horizon; min_off at
+    the current measurement and after a predicted baseline stop is also respected.
+    """
+    n = min(len(t_buffer_c), len(running_w), len(outdoor_c))
+    if n == 0 or slot_s <= 0 or dt_s <= 0:
+        return [], []
+    temps = np.asarray(t_buffer_c[:n], dtype=float)
+    running = np.asarray(running_w[:n], dtype=float) > running_threshold_w
+    outside = np.asarray(outdoor_c[:n], dtype=float)
+    state = initial_controller_state
+    locked_now = bool(state.mode.value == "pause")
+    remaining_off_s = (
+        max(
+            0.0,
+            float(controller_config.min_off_s) - float(state.time_since_stop_s),
+        )
+        if locked_now
+        else 0.0
+    )
+    if state.mode.value in ("heat", "dhw") and not np.any(running):
+        # No predicted stop: the current baseline run covers the whole horizon.
+        remaining_off_s = float("inf")
+
+    n_slots = int(np.ceil(n * dt_s / slot_s))
+    feasible: list[bool] = []
     reasons: list[str] = []
-    if solar_surplus_w is not None and len(solar_surplus_w):
-        peak = float(np.nanmax(_slots(solar_surplus_w)))
-        if peak >= min_pv_surplus_w:
-            reasons.append(f"pv_surplus>={min_pv_surplus_w:.0f}W (peak {peak:.0f}W)")
-    if price_eur_per_kwh is not None and max_price_eur is not None and max_price_eur > 0:
-        prices = _slots(price_eur_per_kwh)
-        prices = prices[np.isfinite(prices)]
-        if len(prices) and float(np.min(prices)) <= max_price_eur:
-            reasons.append(f"price<={max_price_eur:.2f}€ (min {float(np.min(prices)):.2f}€)")
-    if not reasons:
-        return None
-    return SgCandidate(start_s, end_s, energy_wh, max_power_w, "; ".join(reasons))
+    for slot in range(n_slots):
+        start_s = slot * slot_s
+        start_i = int(round(start_s / dt_s))
+        reason = "ok"
+        if start_s < allowed_start_s or start_s >= allowed_end_s:
+            reason = "outside_start_window"
+        elif start_s < remaining_off_s:
+            reason = "min_off"
+        elif start_i >= n or start_i + int(np.ceil(controller_config.min_on_s / dt_s)) > n:
+            reason = "min_on_beyond_horizon"
+        elif running[start_i]:
+            reason = "baseline_running"
+        else:
+            stop_indices = np.where(np.diff(running.astype(int)) == -1)[0] + 1
+            recent_stops = stop_indices[
+                (stop_indices <= start_i)
+                & (start_s - stop_indices * dt_s < controller_config.min_off_s)
+            ]
+            if len(recent_stops):
+                reason = "min_off"
+            elif temps[start_i] >= sg3_top_c - buffer_overshoot_k:
+                reason = "buffer_at_sg3_target"
+            else:
+                duration_s = min(max_duration_s, n * dt_s - start_s)
+                end_i = min(n, start_i + int(np.ceil(duration_s / dt_s)))
+                min_on_i = min(n, start_i + int(np.ceil(controller_config.min_on_s / dt_s)))
+                if np.any(running[start_i:min_on_i]):
+                    reason = "baseline_running_during_min_on"
+                else:
+                    cop = np.asarray(
+                        [
+                            heat_pump.cop(float(t_out), float(sg3_top_c + flow_offset_k))
+                            for t_out in outside[start_i:end_i]
+                        ]
+                    )
+                    if (
+                        not len(cop)
+                        or not np.isfinite(cop).all()
+                        or float(np.min(cop)) < min_cop
+                        or float(np.min(outside[start_i:end_i])) < bivalence_outdoor_c
+                    ):
+                        reason = "cop_bivalence"
+        feasible.append(reason == "ok")
+        reasons.append(reason)
+    return feasible, reasons

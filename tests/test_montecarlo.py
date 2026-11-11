@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from hp_twin.adapters.eos_connect import load_profile_from_slots
 from hp_twin.domain.montecarlo import aggregate_slots, extract_events, run_ensemble
@@ -42,6 +43,15 @@ def test_run_probability() -> None:
     runs = [np.full(len(t), 80.0), np.full(len(t), 2500.0)]  # 1 idle, 1 läuft
     sf = aggregate_slots(t, runs, slot_s=900.0)
     assert np.allclose(sf.run_probability, 0.5)
+
+
+def test_run_share_keeps_the_actual_end_of_a_partial_slot() -> None:
+    t = np.arange(60) * 60.0
+    power = np.full(60, 81.0)  # Standby must never count as compressor operation
+    power[:12] = 2500.0  # 12 of the first 15 minutes: genuine heating
+    sf = aggregate_slots(t, [power], slot_s=900.0, running_threshold_w=200.0)
+    assert sf.run_probability[0] == pytest.approx(0.8)
+    assert sf.run_probability[1] == 0.0
 
 
 def test_eos_profile_192() -> None:

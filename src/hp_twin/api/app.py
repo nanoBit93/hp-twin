@@ -21,14 +21,34 @@ from hp_twin.api.security import require_write
 _STATIC = Path(__file__).parent / "static"
 _STATUS = ServiceStatus()
 _RUN_LOCK = threading.Lock()
+_REQUEST_LOCK = threading.Lock()
+_PENDING_RUNS: list[tuple[RuntimeSettings, bool]] = []
+
+
+def _request_run(settings: RuntimeSettings, do_push: bool) -> None:
+    """Coalesce simultaneous refresh requests into one latest-settings run."""
+    with _REQUEST_LOCK:
+        _PENDING_RUNS.clear()
+        _PENDING_RUNS.append((settings, do_push))
+
+
+def _next_run() -> tuple[RuntimeSettings, bool] | None:
+    with _REQUEST_LOCK:
+        return _PENDING_RUNS.pop(0) if _PENDING_RUNS else None
 
 
 def _run_locked(settings: RuntimeSettings, do_push: bool) -> bool:
-    """Führt einen Zyklus aus, solange nicht schon einer läuft. Aktualisiert _STATUS in place."""
+    """Run a cycle and honor a refresh requested while it was running."""
     if not _RUN_LOCK.acquire(blocking=False):
+        _request_run(settings, do_push)
         return False
     try:
-        run_cycle(settings, do_push, status=_STATUS)
+        while True:
+            run_cycle(settings, do_push, status=_STATUS)
+            queued = _next_run()
+            if queued is None:
+                break
+            settings, do_push = queued
     finally:
         _RUN_LOCK.release()
     return True
@@ -211,9 +231,13 @@ def push_now(request: Request, body: dict[str, Any] | None = None) -> dict[str, 
     settings = RuntimeSettings.load()
     do_push = True if body is None else bool(body.get("push", True))
     if _RUN_LOCK.locked():
-        return {**_STATUS.to_dict(), "already_running": True}
+        _request_run(settings, do_push)
+        return {**_STATUS.to_dict(), "already_running": True, "refresh_queued": True}
     _STATUS.running, _STATUS.phase = True, "Start"
-    threading.Thread(target=_run_locked, args=(settings, do_push), daemon=True).start()
+    _request_run(settings, do_push)
+    queued = _next_run()
+    if queued is not None:
+        threading.Thread(target=_run_locked, args=queued, daemon=True).start()
     return _STATUS.to_dict()
 
 

@@ -37,6 +37,16 @@ def test_min_off_blocks_restart() -> None:
     assert d.charging is True and d.mode is Mode.HEAT_BUFFER
 
 
+def test_sg2_stop_does_not_activate_the_sg3_completion_latch() -> None:
+    c = _ctrl(min_off=0)
+    st = ControllerState(mode=Mode.HEAT_BUFFER, time_in_mode_s=600.0, active_node="buffer")
+    sp = Setpoints(dhw_c=60.0, buffer_c=32.0, buffer_overshoot_k=2.0)
+    st, d = c.decide(st, {"dhw": 60.0, "buffer": 34.0}, sp, 60.0)
+    assert not d.charging and not st.sg3_target_reached
+    st, d = c.decide(st, {"dhw": 60.0, "buffer": 20.0}, sp, 60.0)
+    assert d.charging and d.mode is Mode.HEAT_BUFFER
+
+
 def test_min_on_prevents_early_stop() -> None:
     c = _ctrl(min_on=600)
     st = ControllerState(mode=Mode.HEAT_BUFFER, time_in_mode_s=60.0, active_node="buffer")

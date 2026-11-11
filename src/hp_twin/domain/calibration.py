@@ -111,22 +111,39 @@ def estimate_thresholds(
     t_sensor_c: np.ndarray,
     setpoint_c: np.ndarray,
     circuit: str = "buffer",
+    min_setpoint_c: float | None = None,
+    target_tolerance_k: float | None = None,
 ) -> ThresholdEstimate:
-    """Schätzt Start-/Stoppschwelle relativ zum Soll aus den Verdichter-Flanken."""
+    """Schätzt Start-/Stoppschwelle relativ zum Soll aus den Verdichter-Flanken.
+
+    Bei einem Mindestsollwert werden ausschließlich Stopps verwendet, deren letzter
+    Betriebsschritt diesen Wert erreicht hat. Mit einer Zieltoleranz muss die
+    Temperatur diesen Sollwert auch tatsächlich erreicht haben: Ein vorzeitiger
+    Abbruch unter dem angehobenen SG3-Ziel ist kein thermischer Ladeabschluss.
+    """
     on = np.asarray(compressor_on, float).astype(int)
     ts = np.asarray(t_sensor_c, float)
     sp = np.asarray(setpoint_c, float)
     d = np.diff(on)
     starts = np.where(d == 1)[0]  # Index VOR dem Einschalten
     stops = np.where(d == -1)[0]  # Index VOR dem Ausschalten (letzter An-Schritt)
+    if min_setpoint_c is not None:
+        starts = starts[sp[starts] >= min_setpoint_c]
+        stops = stops[sp[stops] >= min_setpoint_c]
+    if target_tolerance_k is not None:
+        stops = stops[ts[stops] >= sp[stops] - target_tolerance_k]
     start_off = (ts[starts] - sp[starts]) if len(starts) else np.array([np.nan])
     stop_off = (ts[stops] - sp[stops]) if len(stops) else np.array([np.nan])
     return ThresholdEstimate(
         circuit=circuit,
         n_starts=int(len(starts)),
         n_stops=int(len(stops)),
-        start_offset_k=float(np.nanmedian(start_off)),
-        stop_offset_k=float(np.nanmedian(stop_off)),
+        start_offset_k=(
+            float(np.nanmedian(start_off)) if np.isfinite(start_off).any() else float("nan")
+        ),
+        stop_offset_k=(
+            float(np.nanmedian(stop_off)) if np.isfinite(stop_off).any() else float("nan")
+        ),
     )
 
 
@@ -207,6 +224,7 @@ class CalibrationReport:
     buffer_threshold: ThresholdEstimate
     discharge: DischargeFit
     notes: list[str] = field(default_factory=list)
+    sg3_buffer_threshold: ThresholdEstimate | None = None
 
     def to_dict(self) -> dict[str, Any]:
         hp = self.heat_pump
@@ -229,6 +247,9 @@ class CalibrationReport:
                 "start_offset_k": round(self.buffer_threshold.start_offset_k, 2),
                 "stop_offset_k": round(self.buffer_threshold.stop_offset_k, 2),
             },
+            "sg3_buffer_threshold": asdict(self.sg3_buffer_threshold)
+            if self.sg3_buffer_threshold is not None
+            else None,
             "discharge": {
                 "ua_w_per_k": round(self.discharge.ua_w_per_k, 1),
                 "base_load_w": round(self.discharge.base_load_w, 1),
@@ -257,6 +278,9 @@ def calibration_to_json(report: CalibrationReport) -> dict[str, Any]:
         "heat_pump": asdict(report.heat_pump.heat_pump),
         "heat_pump_metrics": {k: getattr(report.heat_pump, k) for k in _HP_METRIC_KEYS},
         "buffer_threshold": asdict(report.buffer_threshold),
+        "sg3_buffer_threshold": asdict(report.sg3_buffer_threshold)
+        if report.sg3_buffer_threshold is not None
+        else None,
         "discharge": asdict(report.discharge),
         "notes": list(report.notes),
     }
@@ -271,4 +295,7 @@ def calibration_from_json(d: dict[str, Any]) -> CalibrationReport:
         buffer_threshold=ThresholdEstimate(**d["buffer_threshold"]),
         discharge=DischargeFit(**d["discharge"]),
         notes=list(d.get("notes", [])),
+        sg3_buffer_threshold=ThresholdEstimate(**d["sg3_buffer_threshold"])
+        if d.get("sg3_buffer_threshold") is not None
+        else None,
     )

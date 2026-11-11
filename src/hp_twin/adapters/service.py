@@ -16,6 +16,8 @@ import pandas as pd
 
 from hp_twin.adapters.settings import RuntimeSettings
 
+_SG3_STATES: dict[tuple[str, str], Any] = {}
+
 
 @dataclass
 class ServiceStatus:
@@ -110,7 +112,7 @@ def run_cycle(
     from hp_twin.adapters.evcc import fetch_market_series_safe
     from hp_twin.adapters.forecast import fetch_live_weather, run_live_forecast
     from hp_twin.adapters.ha_history import export_to_csv
-    from hp_twin.adapters.sg_orchestrator import SgPlanConfig
+    from hp_twin.adapters.sg_orchestrator import Sg3CycleState, SgPlanConfig
     from hp_twin.cli import resolve_calibration
     from hp_twin.domain.model_config import ModelConfig
 
@@ -142,6 +144,7 @@ def run_cycle(
         st.phase = "Kalibrierung"
         model = ModelConfig.from_path(settings.model_path)
         model.montecarlo.n_runs = settings.forecast_runs
+        model.sim.horizon_h = settings.horizon_h
         model.forecast.dhw_setpoint_cap_c = settings.dhw_setpoint_cap_c
         model.forecast.eos_ttl_minutes = settings.eos_ttl_minutes
         topo, df, calib = resolve_calibration(settings, model)
@@ -159,15 +162,17 @@ def run_cycle(
         sg_cfg = SgPlanConfig(
             enabled=bool(settings.sg_enabled),
             sg3_load_id=str(settings.sg_load_id or "sg3_req"),
-            profile_load_id=str(settings.profile_load_id or "hp_ext"),
-            min_pv_surplus_w=float(settings.sg_min_pv_surplus_w),
-            max_price_eur=settings.sg_max_price_eur,
+            contingent_ttl_minutes=float(settings.sg_contingent_ttl_minutes),
+            bivalence_outdoor_c=float(settings.sg_bivalence_outdoor_c),
+            sg3_top_setpoint_c=float(settings.sg_top_setpoint_c),
             dry_run=bool(settings.sg_dry_run),
         )
         market = fetch_market_series_safe(settings)
         if sg_cfg.enabled:
             from hp_twin.adapters.sg_orchestrator import run_sg_cycle
 
+            state_key = (settings.eos_base_url, sg_cfg.sg3_load_id)
+            sg_state = _SG3_STATES.setdefault(state_key, Sg3CycleState())
             fc, sg_res = run_sg_cycle(
                 df,
                 topo,
@@ -178,9 +183,12 @@ def run_cycle(
                 cfg=sg_cfg,
                 eos_base_url=settings.eos_base_url,
                 eos_token=settings.eos_token,
+                weather=weather,
+                state=sg_state,
             )
             st.sg_plan = sg_res.to_dict()
         else:
+            _SG3_STATES.clear()
             fc = run_live_forecast(
                 df, topo, calib, horizon_h=settings.horizon_h, model=model, weather=weather
             )
@@ -191,11 +199,14 @@ def run_cycle(
         # 4) Push an EOS Connect
         if do_push:
             st.phase = "Push an EOS"
-            if not settings.eos_base_url or not settings.eos_managed_load_id:
+            profile_load_id = (
+                settings.profile_load_id if sg_cfg.enabled else settings.eos_managed_load_id
+            )
+            if not settings.eos_base_url or not profile_load_id:
                 raise ValueError("EOS-Verbindung unvollständig (base_url / managed_load_id)")
             st.http_status = push_rest(
                 settings.eos_base_url,
-                settings.eos_managed_load_id,
+                profile_load_id,
                 fc.eos,
                 token=settings.eos_token,
             )
