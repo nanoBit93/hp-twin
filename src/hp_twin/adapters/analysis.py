@@ -155,6 +155,7 @@ def build_analysis(
         "p_el_mean_w": _series(fc.slots.p_el_mean_w, 0),
         "p_el_p10_w": _series(fc.slots.p_el_p10_w, 0),
         "p_el_p90_w": _series(fc.slots.p_el_p90_w, 0),
+        "p_el_det_w": _series(fc.slots.p_el_det_w, 0) if fc.slots.p_el_det_w is not None else None,
         "run_probability": _series(fc.slots.run_probability, 3),
         "energy_wh": _series(fc.slots.energy_wh, 0),
         "expected_energy_kwh": round(float(fc.slots.energy_wh.sum()) / 1000, 2),

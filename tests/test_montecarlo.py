@@ -65,6 +65,36 @@ def test_eos_profile_192() -> None:
     assert abs(p["values"][0] - 1500.0) < 1e-6
 
 
+def test_phase_locked_mean_distributes_ensemble_energy_into_det_windows() -> None:
+    """Phase aus det-Lauf, Energie aus Ensemble: Fenster skaliert, Off-Fenster leer."""
+    from hp_twin.domain.montecarlo import phase_locked_mean
+
+    t = np.arange(240) * 60.0  # 4 h
+    # Det: ein Lauf 60..120 min
+    det_window = np.zeros(240, dtype=int)
+    det_window[60:120] = 1
+    # Ensemble-Läufe: selbe Phase aber unterschiedliche Dauern (Jitter simuliert)
+    run_a = np.zeros(240)
+    run_a[50:130] = 3000.0  # länger
+    run_b = np.zeros(240)
+    run_b[70:110] = 3000.0  # kürzer
+    # Ziel-Energie = mittlere GESAMT-Energie je Lauf (Überhang über das det-Fenster
+    # hinaus gehört ebenfalls zum Zyklus; keine Doppelzählung an Nachbarn):
+    # run_a = 3000 W x 80 min = 4000 Wh, run_b = 3000 W x 40 min = 2000 Wh -> Mittel 3000 Wh
+    out = phase_locked_mean(t, [run_a, run_b], det_window)
+    # Phase bleibt: außerhalb des Fensters 0 (Form = det-Fenster)
+    assert np.all(out[:60] == 0)
+    assert np.all(out[120:] == 0)
+    # Fenster trägt die komplette Zyklus-Energie-Erwartung
+    e_out = out[60:120].sum() / 60.0
+    assert e_out == pytest.approx(3000.0, rel=0.01)
+    # Ausgefallene Läufe senken die Energie proportional (Lauf c fällt komplett aus)
+    run_c = np.zeros(240)
+    out2 = phase_locked_mean(t, [run_a, run_b, run_c], det_window)
+    assert out2[60:120].sum() / 60.0 == pytest.approx(3000.0 * 2.0 / 3.0, rel=0.01)
+    # Form bleibt die det-Form (proportional zum det_mean-Profil im Fenster)
+
+
 def test_run_ensemble_deterministic() -> None:
     def run_once(rng: np.random.Generator) -> np.ndarray:
         return np.full(10, rng.normal(1000, 100))
@@ -73,6 +103,34 @@ def test_run_ensemble_deterministic() -> None:
     b = run_ensemble(run_once, 50, seed=42)
     assert len(a) == 50
     assert np.allclose([x[0] for x in a], [x[0] for x in b])  # reproduzierbar
+
+
+def test_aggregate_slots_blends_deterministic_in_near_term() -> None:
+    """Nahzeit: Erwartungswert = deterministischer Lauf; fern: volles Ensemble."""
+    t = np.arange(96 * 15) * 60.0  # 24 h @ 1 min
+    # Ensemble verschmiert einen 3000-W-Lauf (jeder Lauf leicht phasenversetzt):
+    runs = [np.full(len(t), 3000.0) if k % 2 else np.full(len(t), 60.0) for k in range(4)]
+    det = np.full(len(t), 3000.0)  # scharfer Bezugslauf
+    # Ohne Blend: Mittelwert ~1530 W (verwaschen)
+    sf_plain = aggregate_slots(t, runs, slot_s=900.0)
+    # Mit Blend: nahe Slots ≈ deterministischer Lauf (weicher Übergang), fern = Ensemble-Mittel
+    sf = aggregate_slots(t, runs, slot_s=900.0, deterministic=det, det_blend_hours=6.0)
+    assert sf.p_el_mean_w[0] == pytest.approx(3000.0, rel=0.03)  # ~98 % deterministisch
+    assert sf.p_el_mean_w[2] == pytest.approx(3000.0, rel=0.15)  # Slot 2 (0.75-1h): nahe scharf
+    far = sf.p_el_mean_w[80]  # Slot 80 (~20 h) > 6 h
+    assert far == pytest.approx(sf_plain.p_el_mean_w[80])
+    # energy_wh folgt dem geblendeten Mittelwert
+    assert sf.energy_wh[0] == pytest.approx(3000.0 * 0.25, rel=0.03)
+    # deterministische Kurve als eigene Spur (100 % Referenz)
+    assert sf.p_el_det_w is not None
+    assert np.allclose(sf.p_el_det_w[:3], 3000.0)
+    # Nahzeit-Band schmaler als das volle Ensemble-Band (wächst mit dem Horizont)
+    w_near = sf.p_el_p90_w[0] - sf.p_el_p10_w[0]
+    w_far = sf.p_el_p90_w[80] - sf.p_el_p10_w[80]
+    assert w_near < w_far
+    # det=None oder blend=0 -> altes Verhalten
+    sf_off = aggregate_slots(t, runs, slot_s=900.0, deterministic=det, det_blend_hours=0.0)
+    assert np.allclose(sf_off.p_el_mean_w, sf_plain.p_el_mean_w)
 
 
 def test_run_forecast_endtoend() -> None:

@@ -35,6 +35,8 @@ forecast:
   slot_s: 900.0                  # 15 min
   running_threshold_w: 200.0
   dhw_setpoint_cap_c: 45.0       # neue Konfig: DHW passiv (null = Messwert nutzen)
+  det_blend_hours: 6.0           # Nahzeit scharf: deterministic bis 6 h, danach Ensemble
+  phase_lock: true               # MC liefert Energie je Lauf, det-Liefert Phase (Start/Stop)
   eos_ttl_minutes: null
 backtest:
   horizon_h: 24

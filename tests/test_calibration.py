@@ -79,10 +79,12 @@ def test_stored_calibration_gains_only_sg3_threshold_from_history(tmp_path) -> N
     calibration = tmp_path / "calibration.json"
     frame = synthetic_frame(days=6)
     frame["flow_rate_lpm"] = np.where(frame["compressor_on"] == 1, 20.0, 0.0)
+    # This synthetic frame has no real SG2 regime (every run at 49.8 °C), so the
+    # SG3 phase mask must be disabled, otherwise the SG2 fitters would see nothing.
     frame["setpoint_hk1_c"] = np.where(frame["compressor_on"] == 1, 49.8, 31.5)
     frame["t_hk1_c"] = np.where(frame["compressor_on"] == 1, 51.4, 25.95)
     frame.to_csv(csv, index=False)
-    _, _, calib = _calibrate_report("config/example_topology.yaml", str(csv))
+    _, _, calib = _calibrate_report("config/example_topology.yaml", str(csv), sg3_dilate_min=0)
     original_stop = calib.buffer_threshold.stop_offset_k
     calib.sg3_buffer_threshold = None
     calibration.write_text(json.dumps(calibration_to_json(calib)), encoding="utf-8")

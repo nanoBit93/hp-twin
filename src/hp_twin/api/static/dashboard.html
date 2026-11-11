@@ -102,7 +102,7 @@
 
     <div class="kpis" id="kpis"></div>
 
-    <div class="panel"><h2>Lastprognose (Monte-Carlo): P_el Erwartungswert + P10–P90</h2>
+    <div class="panel"><h2>Lastprognose: P_el Erwartungswert + P10–P90 + deterministische Kurve</h2>
       <div id="fcNote" style="color:var(--muted);font-size:12px;margin-bottom:6px"></div>
       <div id="chartForecast" class="chart"></div></div>
 
@@ -291,10 +291,12 @@
           + (sg && 'n_candidates' in sg ? ` SG3: ${sg.sg3_injected ? '<b class="ok">injiziert</b>' : 'aus'} (${sg.n_candidates} Kandidaten${sg.chosen ? `, gewählt ${Math.floor(sg.chosen.start_min/60)}:${String(Math.round(sg.chosen.start_min%60)).padStart(2,'0')} — ${sg.chosen.energy_wh.toFixed(0)} Wh` : ''}).` : '')
         : '<span class="bad">Replay-Modus (Debug): gemessenes Wetter, kein Live-Start</span>';
       // Forecast band
+      const detTrace = f.p_el_det_w ? [{x:f.slot_hours, y:f.p_el_det_w, name:'Deterministisch (100%)', line:{color:'#5fd27a',width:1.5,dash:'dot'}}] : [];
       Plotly.newPlot('chartForecast', [
         {x:f.slot_hours, y:f.p_el_p90_w, name:'P90', line:{width:0}, showlegend:false, hoverinfo:'skip'},
         {x:f.slot_hours, y:f.p_el_p10_w, name:'P10–P90', fill:'tonexty', fillcolor:'rgba(240,140,58,0.25)', line:{width:0}},
         {x:f.slot_hours, y:f.p_el_mean_w, name:'Erwartungswert', line:{color:'#f08c3a',width:2}},
+        ...detTrace,
       ], {...L, yaxis:{...L.yaxis,title:'P_el [W]'}, xaxis:{...L.xaxis,title:'Stunden ab Start'}}, cfg);
 
       Plotly.newPlot('chartProb', [

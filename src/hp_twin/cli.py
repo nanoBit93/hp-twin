@@ -54,8 +54,12 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
-def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: ignore[no-untyped-def]
-    """Kalibriert WP-Kennfeld, Regler-Schwellen und Gebäude-UA aus Messdaten (parametrisiert)."""
+def _calibrate_report(topology: str, csv: str, model: Any = None, sg3_dilate_min: float = 60.0):  # type: ignore[no-untyped-def]
+    """Kalibriert WP-Kennfeld, Regler-Schwellen und Gebäude-UA aus Messdaten (parametrisiert).
+
+    sg3_dilate_min: Nachlauf in Minuten um jeden SG3-Block, der in kein SG2-Fit einfließt
+    (Default 60 min: Umschalt-/Abkühlphase). 0 deaktiviert die SG3-Maskierung komplett.
+    """
     import numpy as np
 
     from hp_twin.adapters.io_csv import read_measurements, room_columns
@@ -73,6 +77,24 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
     topo = load_topology(topology)
     df = read_measurements(csv)
     dt_s = float(df.index.to_series().diff().dropna().iloc[0].total_seconds())
+
+    # SG3-Phasen ausschließlich über den Status-Sensor erkennen ("SG3 aktiv" >= 3).
+    # Die Sollwert-Heuristik (>= 38 °C) ist setupspezifisch und fällt hier bewusst weg;
+    # die Dilatation (`sg3_dilate_min`) erfasst nur den Umschalt-Nachlauf.
+    sg_status_raw = (
+        np.asarray(df["sg_status"].to_numpy(), dtype=float) if "sg_status" in df.columns else None
+    )
+    dilate_n = int(round(sg3_dilate_min * 60.0 / dt_s)) if sg3_dilate_min > 0 else 0
+    if sg_status_raw is not None and sg3_dilate_min > 0:
+        raw = np.nan_to_num(sg_status_raw, nan=0.0) >= 3.0
+        if raw.any():
+            kernel = np.ones(2 * dilate_n + 1, dtype=bool)
+            sg3_bool = np.convolve(raw, kernel, mode="same")
+        else:
+            sg3_bool = raw
+    else:
+        sg3_bool = np.zeros(len(df), dtype=bool)
+
     m = (
         (df["compressor_on"] == 1)
         & (df["mode"] == "heat")
@@ -80,8 +102,9 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         & (df["p_el_w"] > cal.op_min_p_el_w)
         & (df["t_flow_c"] > df["t_return_c"])
     )
+    m = m & ~sg3_bool
     d = df.loc[m]
-    idle_p = df.loc[df["compressor_on"] == 0, "p_el_w"]
+    idle_p = df.loc[(df["compressor_on"] == 0) & ~sg3_bool, "p_el_w"]
     standby = float(idle_p.median()) if len(idle_p) else cal.standby_fallback_w
     hp_fit = fit_heatpump_map(
         d["t_outdoor_c"].to_numpy(),
@@ -92,8 +115,16 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         t_flow_ref_c=cal.t_flow_ref_c,
         t_out_ref_c=cal.t_out_ref_c,
     )
+
+    # Schwellen: nur SG2-Flanken. Flanken im Vor-/Nachlauf von SG3-Fenstern (dilate_n)
+    # ausgeschlossen, damit sie wirklich im SG2-Regime liegen.
+    on_arr = df["compressor_on"].to_numpy()
+    flanke_ok = ~sg3_bool.copy()
+    if sg3_bool.any():
+        kernel = np.ones(2 * dilate_n + 1, dtype=bool)
+        flanke_ok = ~np.convolve(sg3_bool, kernel, mode="same")
     thr = estimate_thresholds(
-        df["compressor_on"].to_numpy(),
+        np.where(flanke_ok, on_arr, 0),
         df["t_hk1_c"].to_numpy(),
         df["setpoint_hk1_c"].to_numpy(),
         circuit="buffer",
@@ -118,11 +149,14 @@ def _calibrate_report(topology: str, csv: str, model: Any = None):  # type: igno
         volume_l=vol,
         ghi_w_m2=df["ghi_wm2"].to_numpy(),
         window_s=cal.discharge_window_s,
+        exclude_mask=sg3_bool,
     )
     notes = [
         f"COP real median {hp_fit.cop_median_measured:.2f}; Zeitschritt {dt_s:.0f} s",
         f"Gebäude UA~{dis.ua_w_per_k:.0f} W/K, Solar~{dis.solar_w_per_wm2:.2f} W/(W/m²), "
         f"r²={dis.r2:.2f}",
+        f"SG3-Phasen ausgeschlossen: {int(sg3_bool.sum())} Samples "
+        f"({sg3_bool.sum() * dt_s / 3600.0:.1f} h) aus allen SG2-Fittern entfernt",
     ]
     if not np.isnan(thr.start_offset_k):
         notes.append(

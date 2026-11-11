@@ -33,6 +33,7 @@ from hp_twin.domain.montecarlo import (
     SlotForecast,
     aggregate_slots,
     extract_events,
+    phase_locked_mean,
 )
 from hp_twin.domain.sg_plan import DEFAULT_SG3_MIN_SETPOINT_C
 from hp_twin.domain.topology import Topology
@@ -71,6 +72,9 @@ class ForecastResult:
                 "p_el_p10_w": [round(float(x), 1) for x in s.p_el_p10_w],
                 "p_el_p50_w": [round(float(x), 1) for x in s.p_el_p50_w],
                 "p_el_p90_w": [round(float(x), 1) for x in s.p_el_p90_w],
+                "p_el_det_w": (
+                    [round(float(x), 1) for x in s.p_el_det_w] if s.p_el_det_w is not None else None
+                ),
                 "run_probability": [round(float(x), 3) for x in s.run_probability],
                 "energy_wh": [round(float(x), 1) for x in s.energy_wh],
             },
@@ -125,11 +129,24 @@ def run_forecast(
         )
         p_el_runs.append(rep.result.p_el_w)
 
+    if model.forecast.phase_lock:
+        # Phase (Lauf-Fenster) aus dem deterministischen Lauf festhalten, Ensemble-Energie
+        # je Fenster darauf skalieren: phasentreu und ensemble-energieerhaltend über den
+        # ganzen Horizont. Der Erwartungswert bleibt ein reales WP-Taktmuster.
+        det_window = (det.result.p_el_w > model.forecast.running_threshold_w).astype(int)
+        p_el_for_slots = [
+            phase_locked_mean(time_s, [run[: len(time_s)] for run in p_el_runs], det_window)
+        ]
+    else:
+        p_el_for_slots = p_el_runs
     slots = aggregate_slots(
         time_s,
-        p_el_runs,
+        p_el_for_slots,
         slot_s=model.forecast.slot_s,
         running_threshold_w=model.forecast.running_threshold_w,
+        deterministic=det.result.p_el_w,
+        det_blend_hours=model.forecast.det_blend_hours,
+        band_runs=p_el_runs if model.forecast.phase_lock else None,
     )
     n_slots = int(round(horizon_h * 3600 / model.forecast.slot_s))
     expected = 192 if n_slots > 96 else 96

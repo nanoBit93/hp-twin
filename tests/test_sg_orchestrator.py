@@ -745,11 +745,17 @@ def _calib():  # type: ignore[no-untyped-def]
     frame = synthetic_frame(days=3)
     frame["flow_rate_lpm"] = np.where(frame["compressor_on"] == 1, 20.0, 0.0)
     # Two elevated-target stop observations calibrate SG3 separately from SG2.
+    # SG3 phase masking is disabled (sg3_dilate_min=0): this synthetic frame has
+    # no real SG2 regime at all (every run is at 49.8 °C), so the mask would eat
+    # the whole timeline and leave the SG2 fitters empty.
     frame["setpoint_hk1_c"] = np.where(frame["compressor_on"] == 1, 49.8, 31.5)
     frame["t_hk1_c"] = np.where(frame["compressor_on"] == 1, 51.4, 25.95)
     frame.to_csv("/tmp/sg_calib.csv", index=False)
     _, _, calib = _calibrate_report(
-        "config/example_topology.yaml", "/tmp/sg_calib.csv", model=ModelConfig()
+        "config/example_topology.yaml",
+        "/tmp/sg_calib.csv",
+        model=ModelConfig(),
+        sg3_dilate_min=0,
     )
     assert calib.sg3_buffer_threshold is not None
     assert calib.sg3_buffer_threshold.stop_offset_k == pytest.approx(1.6)

@@ -165,6 +165,7 @@ def fit_discharge(
     volume_l: float,
     ghi_w_m2: np.ndarray | None = None,
     window_s: float = 900.0,
+    exclude_mask: np.ndarray | None = None,
 ) -> DischargeFit:
     """Heizlast aus der Puffer-Entladerate bei abgeschalteter WP.
 
@@ -173,6 +174,10 @@ def fit_discharge(
     P_entlade = C_puffer * (T_start - T_ende)/window, regressiert auf das mittlere `driver_dt_c`
     (z. B. T_raum - T_außen) und optional die Globalstrahlung (Solargewinn entlastet die Heizung):
     P = base + ua*driver - solar*GHI. Steigung ua = effektives UA_Gebäude.
+
+    ``exclude_mask`` (True = ausgeschlossen) entfernt z. B. SG3-Phasen samt Nachlauf: Direkt
+    nach einem SG3-Lauf ist der Puffer deutlich heißer als das SG2-Regime, die Entlade-
+    rate wäre dann keine SG2-Heizlast mehr.
     """
     tb = np.asarray(buffer_temp_c, float)
     drv = np.asarray(driver_dt_c, float)
@@ -180,13 +185,18 @@ def fit_discharge(
     ghi = np.asarray(ghi_w_m2, float) if ghi_w_m2 is not None else None
     c_buffer = volume_l * RHO_CP_J_PER_L_K
     w = max(int(round(window_s / dt_s)), 2)
+    excl = (
+        np.asarray(exclude_mask, dtype=bool).astype(int)
+        if exclude_mask is not None
+        else np.zeros(len(tb), dtype=int)
+    )
 
     drv_pts: list[float] = []
     ghi_pts: list[float] = []
     disch_pts: list[float] = []
     for s in range(0, len(tb) - w, w):
         seg = slice(s, s + w)
-        if on[seg].any():  # WP lief im Fenster -> überspringen
+        if on[seg].any() or excl[seg].any():  # WP lief ODER SG3-Phase im Fenster -> überspringen
             continue
         discharge_w = c_buffer * (tb[s] - tb[s + w]) / window_s
         if discharge_w > 0 and np.isfinite(discharge_w):

@@ -80,6 +80,20 @@ class ForecastParams(_Model):
         default=45.0,
         description="DHW-Soll deckeln (neue Konfig, passive DHW); None = Messwert nutzen",
     )
+    # Nahzeit-Schärfe: Erwartungswert blendet weich vom deterministischen Lauf auf das
+    # Ensemble-Mittel (0/None = überall volles Ensemble = alter, verschmierter Mittelwert).
+    det_blend_hours: float = Field(
+        default=6.0,
+        ge=0,
+        description="Stunden bis der Erwartungswert voll im Ensemble-Mittel ist",
+    )
+    # Phasen-locked Ensemble: Lauf-Fenster (Phase) aus dem deterministischen Lauf, Ensemble-
+    # Energie je Lauf in Fenster skaliert. MC liefert die Energie, det die Startzeiten.
+    phase_lock: bool = Field(
+        default=False,
+        description="Erwartungswert auf deterministische Phase festnageln "
+        "(Ensemble-Energie je Lauf)",
+    )
     eos_ttl_minutes: int | None = None
 
 

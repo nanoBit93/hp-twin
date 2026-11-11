@@ -1,6 +1,6 @@
 # Home-Assistant-Add-on: hp-twin – Wärmepumpen-Lastprognose für EOS Connect
 name: hp-twin Wärmepumpen-Zwilling
-version: "0.1.7"
+version: "0.1.8"
 slug: hp_twin
 description: >-
   Zustandsbasierte 48-h-Lastprognose der Wärmepumpe (Monte-Carlo) mit
